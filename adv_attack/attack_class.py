@@ -2963,6 +2963,602 @@ class ADV_ATTACK:
 
 
 
+class MM3DAdv_ATTACK:
+    def __init__(self, config_path:str='./models/cldm_v15.yaml',
+                  model_path:str='./models/control_sd15_scribble.pth', 
+                  device:torch.device=torch.device("cuda"),
+                  detect_model_type:str='yolov11',
+                  model_path_object_detection:str=None,
+                  sam_model_type:str="vit_h",
+                  sam_checkpoint_path:str="sam_vit_h_4b8939.pth",
+                  captioner_model_name:str=r"./models/Salesforceblip_image_captioning_large",
+                  inpaint_model_path:str=r"./sdxl-inpaint-model",
+                  vae_model_path:str=r"models\sd_vae_ft_mse",
+                  kwargs:dict=None,
+                  detect_params:dict=None
+                  ):
+        """
+        初始化对抗攻击类
+        
+        参数:
+            config_path: 模型配置文件路径 (默认 "./models/cldm_v15.yaml")
+            device: 运行设备 (默认 "cuda")
+            model_type: 目标检测模型类型 (默认 "yolov5")
+            class_names: 目标检测模型类别 (默认 ['person'])
+            device: 运行设备 (默认 "cuda")
+        """
+        
+
+        # 默认参数配置
+        if kwargs:
+            self.default_params = kwargs
+        else:
+            self.default_params = {
+            "prompt": "covered with jungle camouflage pattern, high detail, realistic texture, 8k, ultra sharp",
+            "a_prompt": "",
+            "n_prompt": "blurry, low resolution, ugly, deformed, noisy texture, pixelated, unrealistic, bad detail, distorted pattern",
+            "num_samples": 1,
+            "ddim_steps": 30,
+            "guess_mode": False,
+            "strength": 1.0,
+            "scale": 9,
+            "scale_optim":9, # 优化过程的控制
+            "seed": 42,
+            "eta": 0.0,
+            "save_memory": True,
+            "optim_epochs":30, # 默认 20
+            "latent_fit_optim_epochs":5,
+            "attribution_loss_weight" :0,
+            "TV_loss_weight":0,
+            "lr":5e-2, # V2 5e-3 ；v3 5e-3
+            "conext_loss_weight":100, # 100
+            "perceptual_loss_weight":0
+        }
+            # scale  encode 8,优化为2，目前测试效果比较好
+            # 后续改成一样，效果需要试验
+    
+        # 加载模型配置
+        self.config_path = config_path
+        self.model_path = model_path
+        self.device = device
+        self.class_names_ymal=detect_params['nclass_yaml_path']
+
+        self.detect_model_type = detect_model_type
+        self.model_path_object_detection=model_path_object_detection
+        self.sam_model_type = sam_model_type
+        self.sam_checkpoint_path = sam_checkpoint_path
+        self.captioner_model_name=captioner_model_name
+        self.inpaint_model_path=inpaint_model_path
+        self.vae_model_path=vae_model_path
+        self.detect_params=detect_params
+
+
+
+
+    def set_params(self, **kwargs):
+        """更新攻击参数"""
+        for key, value in kwargs.items():
+            if key in self.default_params:
+                self.default_params[key] = value
+            else:
+                print(f"警告: 参数 {key} 不是有效参数，将被忽略")
+
+
+
+    # 初始化controlnet模型
+    def init_controlnet(self):
+        """初始化ControlNet模型"""
+                # 初始化模型
+        self.model = create_model(self.config_path).cpu()
+        self.model.load_state_dict(load_state_dict(self.model_path, location='cuda'),strict=False)
+        self.ddim_sampler = DDIMSampler(self.model)
+
+
+    # 模型destroy
+    def destroy_controlnet(self):
+        """销毁模型"""
+        # 判断模型是否已经初始化
+        if hasattr(self, 'model'):
+            del self.model
+        if hasattr(self, 'ddim_sampler'):
+            del self.ddim_sampler
+
+        torch.cuda.empty_cache()
+
+
+
+
+    def init_object_detection(self,device=None,**kwargs):
+        """初始化目标检测模型"""
+        if device is None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # 加载检测模型
+
+
+        self.object_detection=ObjectDetection(device=device,
+                                              **self.detect_params)
+        
+        model_type=kwargs['attack_model']["model_type"]
+        modelt_path=kwargs['attack_model']["model_path"]
+        self.object_detection.load_model( model_type=model_type,
+                                    model_path=modelt_path
+                                    )
+        
+    def init_object_detection_return(self,device=None,detect_params=None):
+        """初始化目标检测模型"""
+        if device is None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # 加载检测模型
+
+
+        object_detection=ObjectDetection(device=device,
+                                            **detect_params)
+        
+        model_type=detect_params['attack_model']["model_type"]
+        modelt_path=detect_params['attack_model']["model_path"]
+        object_detection.load_model( model_type=model_type,
+                                    model_path=modelt_path
+                                    )
+        return object_detection
+
+    def destroy_object_detection(self,object_detection):
+        """销毁目标检测模型"""
+        if object_detection is not None:
+            del object_detection
+        # 清空内存
+        torch.cuda.empty_cache()
+
+
+    def detect_val(self,input_image,
+                   input_path,
+                   input_file_name,
+                   detect_params=None 
+                   ):
+        """初始化目标检测模型"""
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # 加载检测模型
+        object_detection_val=ObjectDetection(device=device,
+                                              ** detect_params)
+        detect_result_list={}
+        for val_model_key in detect_params['val_model1'].keys():
+            model_type_val=detect_params['val_model1'][val_model_key]["model_type"]
+            model_path_val=detect_params['val_model1'][val_model_key]["model_path"]
+            if len(model_path_val)<=0 :
+                object_detection_val.load_model( model_type=model_type_val)
+            else:                        
+                object_detection_val.load_model( model_type=model_type_val,
+                                        model_path=model_path_val
+                                        )
+            # 检测
+            image_name=input_file_name+model_type_val+'.jpg'
+            temp_result,_=object_detection_val.detect_eval(images=input_image,
+                                                model_type=model_type_val,
+                                                file_path=input_path,
+                                                file_name=image_name)
+            # 删除模型
+            if    model_type_val in object_detection_val.models:                     
+                    del object_detection_val.models[model_type_val]
+            detect_result_list[model_type_val]=temp_result
+            
+            # 清空内存
+            torch.cuda.empty_cache()
+        return detect_result_list
+            
+        
+
+
+
+    # 初始纹理生成
+    def init_tex_generate(self,canny_object=None, 
+                            canny_ref=None,
+                            weight_object=0.5,
+                            threshold=0.5,
+                            ref_class=None,
+                            negtive_class=None,
+                            cam_target_class=None,
+                            amp_status=False,
+
+                            params=None):
+        """
+
+        
+        参数:
+            canny_object: object canny image
+            canny_ref: ref canny image
+            weight_object: object canny weight
+            threshold: canny threshold
+            images_path: image path,完整的图像路径列表
+            params: 参数
+            ref_class: 参考的目标物体信息,优先使用ref_class
+            cam_target_class: 伪装的目标信息
+            amp_status: 解码部分是否使用bf16
+        return:
+            controlnet_adv_sample: 根据Canny边缘生成初始纹理
+
+        """
+        if params is None:
+            print("参数未定义")
+            raise Exception 
+        
+            return 
+        
+        """
+            ====================================================
+            =========== controlnet 的初始化,采样 ===============
+            ====================================================
+        """
+
+        B,C,H, W= canny_object.shape
+        shape = (4, H // 8, W // 8)
+
+        
+
+        # canny 合并
+        if canny_ref is not None:
+            control_image=canny_object*weight_object+canny_ref*(1-weight_object)
+            # 重新变为0或者1
+            control_image = torch.where(control_image > threshold, torch.tensor(1.0), torch.tensor(0.0))
+        else :
+            control_image=canny_object
+
+        # 初始化模型
+        self.init_controlnet()
+        # 条件编码部分 放在GPU
+        if params["save_memory"]:
+            self.model.low_vram_shift(is_diffusing=False)
+
+
+        if control_image.dim()==3:
+            control_image=control_image.unsqueeze(0)
+
+        
+        # 获取batch
+
+        # 缩放control image
+
+
+
+
+
+        """
+            ====================================================
+            =========== controlnet采样 ===============
+            ====================================================
+        """
+        # control_text=[s1+" . "+s2+" . "+s1+params["prompt"] for s1,s2 in   zip(object_class,object_imag_caption)]
+        if ref_class is not None:
+            control_text=[' '.join([s1]*1)+" . "+" . "+s1+params["prompt"] for s1 in   ref_class] # 目前较正常
+        elif cam_target_class is not None:
+            control_text=[' '.join([s1]*1)+" . "+" . "+s1+params["prompt"] for s1 in   cam_target_class]
+        else :
+            control_text=[params["prompt"] ]*B
+
+        if negtive_class is not None:
+            negtive_control_text=[' '.join([s1]*5)+" . "+" . "+s1+params["n_prompt"] for s1 in   negtive_class]
+        else :
+            negtive_control_text=[params["n_prompt"]] * B
+        # c_concat 草图控制；c_crossattn 跨模态控制：正向和附加的文本提示;文本内容默认用clip编码
+        cond = {
+            "c_concat": [control_image],
+            "c_crossattn": [
+                self.model.get_learned_conditioning(
+                    control_text  
+                )
+            ]
+        }
+        un_cond = {
+            "c_concat": None if params["guess_mode"] else [control_image],
+            "c_crossattn": [
+                self.model.get_learned_conditioning(
+                     negtive_control_text   # [params["n_prompt"]] * B
+                )
+            ]
+        }
+ 
+        self.model.control_scales = (
+            [params["strength"] * (0.825 ** float(12 - i)) for i in range(13)]
+            if params["guess_mode"]
+            else [params["strength"]] * 13
+        ) 
+        # 切换扩散部分放在GPU
+        if params["save_memory"]:
+            self.model.low_vram_shift(is_diffusing=True)
+        st_time=time.time()
+        with torch.no_grad():
+            samples, intermediates = self.ddim_sampler.sample(params["ddim_steps"], B,
+                                                    shape, cond, verbose=False, eta=params["eta"],
+                                                    unconditional_guidance_scale=params["scale"],
+                                                    unconditional_conditioning=un_cond)            
+        
+        
+            controlnet_adv_sample = self.model.decode_first_stage(samples)
+        end = time.time()
+        print(f"sample time:{end-st_time:.2f}")        
+        self.destroy_controlnet() 
+
+
+        controlnet_adv_sample=(controlnet_adv_sample+1)/2 # 采样原始范围为-1到1，这里转为0-1
+        # 限制范围
+        controlnet_adv_sample=torch.clamp(controlnet_adv_sample,0,1)
+
+        # 返回0-1的tensor
+        return controlnet_adv_sample,control_image
+
+
+    def mask_generate(self,
+                      background_imag,
+                      result_gt=None,
+                      object_class=None,
+                      mask_type=0,
+                      connected_component=1,
+                      mutil_mask=False,
+                      ):
+        '''
+        参数：
+            background_imag: 背景图像
+            images_path: 输出图像路径，如果为None，则不保存
+            mask_type: 0-单目标的mask,1-多个目标的mask
+            connected_component: 0-不进行连通性处理,1-进行连通性处理,针对单个目标的情况
+        '''
+        if len(result_gt['boxes'])==0:
+            return None
+        if mask_type==0:
+            # 过滤筛选出最大的物体
+            result_gt,object_class=filter_max_box_per_batch(result_gt,object_class)      
+    
+
+        input_boxes_list=result_gt['boxes']
+        # 如果没有，直接跳过
+        if len(input_boxes_list[0])==0:
+            
+            return None
+        """
+            ====================================================
+            =========== 利用sam 模型，得到图像掩码 ===============
+            ====================================================
+        """
+        # 基于输入的background_imag，利用sam，得到mask，返回mask。
+        # 模型初始化
+        sam_predicter=init_sam(model_type=self.sam_model_type, 
+                               checkpoint_path=self.sam_checkpoint_path)
+        # 处理,注意mask——logic 的维度，是否是多个通道
+        
+        #sam_masks_logic_mutil_list 列表里面，为numpy，N*H*W
+        sam_img_np, \
+        sam_masks_logic_mutil_list, \
+        sam_masks_tensor_all,\
+        sam_scores_all_list=segment_tensor(predictor=sam_predicter, 
+                                                    tensor_img=background_imag,
+                                                    input_labels_batch=object_class,
+                                                    input_boxes_batch=input_boxes_list
+                                                    ,mutil_mask=mutil_mask)
+        
+        
+        # visualize_sam(background_imag, masks_logic_mutil, scores)
+        destroy_sam(sam_predicter)
+
+
+        # control 处理
+
+        # # mask 选择
+        # mask_logic_np_select, mask_tensor_select=select_mask_by_criteria(
+        #     masks_logic_mutil_all=sam_masks_logic_mutil_list,
+        #     masks_tensor_all=sam_masks_tensor_all,
+        #     scores_all=sam_scores_all_list,
+        #     exp_path=all_exp_root,
+        #     mask_select_statues=mask_select_statues
+        # )
+        mask_logic_np_select=np.concatenate(sam_masks_logic_mutil_list, axis=0)
+        if connected_component==1:
+            mask_logic_np_select=get_largest_connected_component(mask_logic_np_select)
+
+
+        return mask_logic_np_select,result_gt,object_class
+
+
+    def canny_get_mask(self,
+                      background_imag,
+                      mask=None,
+                      canny_type=0,
+                      with_mask_edge=False,
+                      with_content_canny=True,
+                      blur_status=True,
+                      kern_size=5,
+                      canny_low=50,
+                      canny_high=150
+                      ):
+        '''
+        参数：
+            background_imag: 背景图像
+            images_path: 输出图像路径，如果为None，则不保存
+            canny_type: 0-按照比例缩放,1-不缩放
+        '''
+            
+        # 提取物体
+        B,C,H,W=background_imag.shape
+        # 默认使用0填充
+        object_image=extract_mask_content(background_imag,mask,mask_value=0)
+        object_image,rect_coord_list=crop_mask_region(object_image,mask)
+        if canny_type==0 or canny_type==2: 
+            object_image,resize_scale=resize_images_keep_aspect(object_image,(H,W))
+        elif canny_type==1:
+            # 不等比例缩放
+            rect_list=[(H,W) for i in range(B)]
+            object_image,resize_scale=resize_images(object_image,rect_list)
+        else:
+            resize_scale=1
+
+        canny_for_visual,control_image=canny_with_mask_invert(background_imag=object_image,
+                                                              with_mask_edge=with_mask_edge,
+                                                              with_content_canny=with_content_canny,
+                                                              blur_k_size=kern_size,
+                                                              canny_high=canny_high,
+                                                              canny_low=canny_low,
+                                                              blur_status=blur_status)
+
+        return control_image,rect_coord_list,resize_scale
+
+    def init_tex_postprocess(self,
+            init_texture,
+            background_imag,
+            mask_np,
+            rect_list=None,
+            resize_scale=None,
+            statues=0
+        ):
+        """
+        初始化纹理
+        参数：
+            init_texture: 初始纹理
+            background_imag: 背景图像
+            rect_list: 矩形框列表
+            all_exp_root: 所有实验根目录
+            statues: 0-表示需要缩放,1
+        """
+        if statues==0 or statues==2: 
+            
+            init_texture=resized_images(init_texture,resize_scale)
+            init_texture=paste_images_to_background_no_scale(init_texture,rect_list,background_imag)
+
+        elif statues==1:
+            shale_list=[ (temp[3]-temp[1]  ,temp[2]-temp[0])  for temp in    rect_list]
+            init_texture,_=resize_images(init_texture,shale_list)
+            init_texture=paste_images_to_background_no_scale(init_texture,rect_list,background_imag)
+        init_texture=batched_tensor_mask_overlay(background_imag,
+                                                    init_texture,
+                                                    mask_np)
+
+        return init_texture
+
+
+
+
+
+    def to_imgTensor_from_numpy_int8(self, image):
+        """
+        作用：将numpy数组转换为PyTorch张量。
+        参数：
+        image: 输入的numpy数组，形状为[C, H, W]。
+        返回：
+        tensor: 转换后的PyTorch张量，形状为[C, H, W]。
+        """
+
+        # 转换到-1到1
+        image = image.astype(np.float32) / 127.5 - 1.0
+
+        tensor = torch.from_numpy(image).float()
+
+        
+        return tensor.unsqueeze(0)
+    
+
+    def generate_edge_control_from_image(self, image,file_path=None):
+        '''
+        作用：预处理图像，返回边缘图和边缘的control
+        参数：
+        image: 输入的图像
+        返回：
+        detected_map: 边缘图(size: [H, W])
+        control: 边缘的control(size: [num_samples, 3, H, W])
+        '''
+        # resize,opencv 格式
+        
+        H, W, C = image.shape
+        # 使用opencv 进行边缘检测
+        canny_map = cv2.Canny(image, 100, 200)
+        # 黑白交换（位运算反转）
+        detected_single_map = cv2.bitwise_not(canny_map)
+        detected_map = np.stack([detected_single_map]*3, axis=-1)
+        if file_path is not None:
+            cv2.imwrite(file_path,detected_map)
+        # detected_map = np.zeros_like(image, dtype=np.uint8)
+        # detected_map[np.min(image, axis=2) < 127] = 255
+
+        control = torch.from_numpy(detected_map.copy()).float().cuda() / 255.0
+        control = torch.stack([control for _ in range(self.default_params["num_samples"])], dim=0)
+        control = einops.rearrange(control, 'b h w c -> b c h w').clone()
+
+        return detected_map,control
+    
+    # 将图片转化为latent
+    def imgTensor_to_latent(self, img,scale=0.18215):
+        '''
+        img:[-1-1],type:tensor
+        return: latent, type:tensor
+        '''
+        
+        #编码为潜变量（关闭梯度计算，提高效率）
+        with torch.no_grad():
+            posterior = self.model.first_stage_model.encode(img)  # 得到后验分布
+            
+            # # 4. 从分布中获取潜变量
+            # if sample_posterior:
+            #     z = posterior.sample()  # 随机采样（带随机性）
+            # else:
+            z = posterior.mode()    # 取均值（确定性结果，推荐用于推理）
+        z=z*scale
+        z=z.to(self.device)
+        return z   
+    # def latent_to_imgTensor01(self,latent):
+    #     img = self.model.first_stage_model.decode(latent)
+    #     return  (einops.rearrange(img, 'b c h w -> b h w c') * 127.5 + 127.5).cpu().numpy().clip(0, 255).astype(np.uint8)
+
+    def latent_to_imgTensor01(self,latent,scale=0.18215):
+        latent = latent / scale
+        img = self.model.first_stage_model.decode(latent)
+        # sd 对应的区间为-1到1，需要转换到0到1
+        img = ((img + 1)*0.5 ).to(dtype=torch.float32)
+    
+        # # 确保与YOLO模型在同一设备
+        # img = img.to(self.yolo_model.device)  # 假设self.yolo_model是加载的YOLO模型
+        
+        return img
+        # return  (einops.rearrange(img, 'b c h w -> b h w c') * 127.5 + 127.5).cpu().numpy().clip(0, 255).astype(np.uint8)
+
+
+    def tensor_01_to_numpy_255(self,tensor):
+        """
+        将模型输出的0-1范围图像张量转换为0-255范围numpy数组，并调整通道顺序
+        
+        Args:
+            tensor: 模型输出的图像张量，格式为 [B, C, H, W] 或 [C, H, W]（单张图像）
+                    数值范围必须是 [0, 1]，通道数通常为1（灰度）或3（RGB/BGR）
+            is_rgb: 若为True，默认输入通道为RGB（无需额外转换）；
+                    若为False，会将RGB转为BGR（适配opencv的默认通道顺序）
+        
+        Returns:
+            numpy_array: 转换后的numpy数组，格式为 [B, H, W, C] 或 [H, W, C]（单张图像）
+                        数值范围 [0, 255]，数据类型 uint8
+        """
+        # -------------------------- 1. 处理单张图像（无批量维度） --------------------------
+        if tensor.dim() == 3:  # 输入为 [C, H, W]（单张图像），添加批量维度变为 [1, C, H, W]
+            tensor = tensor.unsqueeze(0)
+        
+
+        # -------------------------- 2. 设备迁移 + 张量转numpy --------------------------
+        # 推理阶段用 .detach() 切断梯度，训练阶段若需保留梯度可移除（但通常图像转换用于推理）
+        if tensor.is_cuda:
+            tensor = tensor.cpu()  # 移到CPU（numpy不支持CUDA数据）
+        np_array = tensor.detach().numpy()  # 张量 → numpy数组，格式 [B, C, H, W]
+
+        # -------------------------- 3. 0-1 → 0-255 缩放 + 数据类型转换 --------------------------
+        # 乘以255后用np.clip确保数值在0-255（避免浮点误差导致的超界，如1.0001→255.025）
+        np_array = np.clip(np_array * 255.0, a_min=0, a_max=255)
+
+        np_array = np_array.astype(np.uint8)
+
+        np_array = np.transpose(np_array, axes=(0, 2, 3, 1))  # 调整维度顺序
+
+ 
+
+        if np_array.shape[0] == 1:
+            np_array = np_array.squeeze(0)  # 从 [1, H, W, C] 变为 [H, W, C]
+
+        return np_array
+
+
+
 
 
 
