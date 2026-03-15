@@ -43,6 +43,7 @@ from IDG_util.attribution_methods.saliencyMethods import *
 from vae import *
 from ADVLogo_attack_tools import *
 from fgsm_attack_tools import *
+from pt3D_tools import *
 
 class ADV_ATTACK:
     def __init__(self, config_path:str='./models/cldm_v15.yaml',
@@ -2967,14 +2968,9 @@ class MM3DAdv_ATTACK:
     def __init__(self, config_path:str='./models/cldm_v15.yaml',
                   model_path:str='./models/control_sd15_scribble.pth', 
                   device:torch.device=torch.device("cuda"),
-                  detect_model_type:str='yolov11',
-                  model_path_object_detection:str=None,
-                  sam_model_type:str="vit_h",
-                  sam_checkpoint_path:str="sam_vit_h_4b8939.pth",
-                  captioner_model_name:str=r"./models/Salesforceblip_image_captioning_large",
-                  inpaint_model_path:str=r"./sdxl-inpaint-model",
-                  vae_model_path:str=r"models\sd_vae_ft_mse",
-                  kwargs:dict=None,
+                  vae_model_path:str=r"models/sd_vae_ft_mse",
+                  exp_params:dict=None,
+                  adv_params:dict=None,
                   detect_params:dict=None
                   ):
         """
@@ -2983,39 +2979,10 @@ class MM3DAdv_ATTACK:
         参数:
             config_path: 模型配置文件路径 (默认 "./models/cldm_v15.yaml")
             device: 运行设备 (默认 "cuda")
-            model_type: 目标检测模型类型 (默认 "yolov5")
-            class_names: 目标检测模型类别 (默认 ['person'])
-            device: 运行设备 (默认 "cuda")
+            exp_params: 实验参数 (默认 None),包含训练轮数、学习率,权重,bf,exp 路径
+            adv_params: 对抗攻击参数 (默认 None)
+            detect_params: 目标检测参数 (默认 None)
         """
-        
-
-        # 默认参数配置
-        if kwargs:
-            self.default_params = kwargs
-        else:
-            self.default_params = {
-            "prompt": "covered with jungle camouflage pattern, high detail, realistic texture, 8k, ultra sharp",
-            "a_prompt": "",
-            "n_prompt": "blurry, low resolution, ugly, deformed, noisy texture, pixelated, unrealistic, bad detail, distorted pattern",
-            "num_samples": 1,
-            "ddim_steps": 30,
-            "guess_mode": False,
-            "strength": 1.0,
-            "scale": 9,
-            "scale_optim":9, # 优化过程的控制
-            "seed": 42,
-            "eta": 0.0,
-            "save_memory": True,
-            "optim_epochs":30, # 默认 20
-            "latent_fit_optim_epochs":5,
-            "attribution_loss_weight" :0,
-            "TV_loss_weight":0,
-            "lr":5e-2, # V2 5e-3 ；v3 5e-3
-            "conext_loss_weight":100, # 100
-            "perceptual_loss_weight":0
-        }
-            # scale  encode 8,优化为2，目前测试效果比较好
-            # 后续改成一样，效果需要试验
     
         # 加载模型配置
         self.config_path = config_path
@@ -3023,23 +2990,19 @@ class MM3DAdv_ATTACK:
         self.device = device
         self.class_names_ymal=detect_params['nclass_yaml_path']
 
-        self.detect_model_type = detect_model_type
-        self.model_path_object_detection=model_path_object_detection
-        self.sam_model_type = sam_model_type
-        self.sam_checkpoint_path = sam_checkpoint_path
-        self.captioner_model_name=captioner_model_name
-        self.inpaint_model_path=inpaint_model_path
         self.vae_model_path=vae_model_path
         self.detect_params=detect_params
+        self.exp_params=exp_params
+        self.adv_params=adv_params
 
 
 
 
     def set_params(self, **kwargs):
-        """更新攻击参数"""
+        """更新实验参数"""
         for key, value in kwargs.items():
-            if key in self.default_params:
-                self.default_params[key] = value
+            if key in self.adv_params:
+                self.adv_params[key] = value
             else:
                 print(f"警告: 参数 {key} 不是有效参数，将被忽略")
 
@@ -3068,7 +3031,7 @@ class MM3DAdv_ATTACK:
 
 
 
-    def init_object_detection(self,device=None,**kwargs):
+    def init_object_detection(self,device=None):
         """初始化目标检测模型"""
         if device is None:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -3078,13 +3041,14 @@ class MM3DAdv_ATTACK:
         self.object_detection=ObjectDetection(device=device,
                                               **self.detect_params)
         
-        model_type=kwargs['attack_model']["model_type"]
-        modelt_path=kwargs['attack_model']["model_path"]
+        model_type=self.detect_params['attack_model']["model_type"]
+        modelt_path=self.detect_params['attack_model']["model_path"]
         self.object_detection.load_model( model_type=model_type,
                                     model_path=modelt_path
                                     )
         
-    def init_object_detection_return(self,device=None,detect_params=None):
+    def init_object_detection_return(self,device=None):
+        detect_params=self.detect_params
         """初始化目标检测模型"""
         if device is None:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -3112,10 +3076,9 @@ class MM3DAdv_ATTACK:
     def detect_val(self,input_image,
                    input_path,
                    input_file_name,
-                   detect_params=None 
                    ):
         """初始化目标检测模型"""
-
+        detect_params=self.detect_params
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         # 加载检测模型
         object_detection_val=ObjectDetection(device=device,
@@ -3150,38 +3113,24 @@ class MM3DAdv_ATTACK:
 
 
     # 初始纹理生成
-    def init_tex_generate(self,canny_object=None, 
-                            canny_ref=None,
-                            weight_object=0.5,
-                            threshold=0.5,
+    def init_tex_generate(self,control_image=None, 
                             ref_class=None,
                             negtive_class=None,
                             cam_target_class=None,
-                            amp_status=False,
-
-                            params=None):
+                            ):
         """
 
         
         参数:
-            canny_object: object canny image
+            control_image: object canny image
             canny_ref: ref canny image
-            weight_object: object canny weight
-            threshold: canny threshold
-            images_path: image path,完整的图像路径列表
-            params: 参数
+
             ref_class: 参考的目标物体信息,优先使用ref_class
             cam_target_class: 伪装的目标信息
-            amp_status: 解码部分是否使用bf16
         return:
             controlnet_adv_sample: 根据Canny边缘生成初始纹理
 
         """
-        if params is None:
-            print("参数未定义")
-            raise Exception 
-        
-            return 
         
         """
             ====================================================
@@ -3189,23 +3138,16 @@ class MM3DAdv_ATTACK:
             ====================================================
         """
 
-        B,C,H, W= canny_object.shape
+        B,C,H, W= control_image.shape
         shape = (4, H // 8, W // 8)
 
         
 
-        # canny 合并
-        if canny_ref is not None:
-            control_image=canny_object*weight_object+canny_ref*(1-weight_object)
-            # 重新变为0或者1
-            control_image = torch.where(control_image > threshold, torch.tensor(1.0), torch.tensor(0.0))
-        else :
-            control_image=canny_object
 
         # 初始化模型
         self.init_controlnet()
         # 条件编码部分 放在GPU
-        if params["save_memory"]:
+        if self.exp_params["save_memory"]:
             self.model.low_vram_shift(is_diffusing=False)
 
 
@@ -3228,16 +3170,16 @@ class MM3DAdv_ATTACK:
         """
         # control_text=[s1+" . "+s2+" . "+s1+params["prompt"] for s1,s2 in   zip(object_class,object_imag_caption)]
         if ref_class is not None:
-            control_text=[' '.join([s1]*1)+" . "+" . "+s1+params["prompt"] for s1 in   ref_class] # 目前较正常
+            control_text=[' '.join([s1]*1)+" . "+" . "+s1+self.exp_params["prompt"] for s1 in   ref_class] # 目前较正常
         elif cam_target_class is not None:
-            control_text=[' '.join([s1]*1)+" . "+" . "+s1+params["prompt"] for s1 in   cam_target_class]
+            control_text=[' '.join([s1]*1)+" . "+" . "+s1+self.exp_params["prompt"] for s1 in   cam_target_class]
         else :
-            control_text=[params["prompt"] ]*B
+            control_text=[self.exp_params["prompt"] ]*B
 
         if negtive_class is not None:
-            negtive_control_text=[' '.join([s1]*5)+" . "+" . "+s1+params["n_prompt"] for s1 in   negtive_class]
+            negtive_control_text=[' '.join([s1]*5)+" . "+" . "+s1+self.exp_params["n_prompt"] for s1 in   negtive_class]
         else :
-            negtive_control_text=[params["n_prompt"]] * B
+            negtive_control_text=[self.exp_params["n_prompt"]] * B
         # c_concat 草图控制；c_crossattn 跨模态控制：正向和附加的文本提示;文本内容默认用clip编码
         cond = {
             "c_concat": [control_image],
@@ -3248,7 +3190,7 @@ class MM3DAdv_ATTACK:
             ]
         }
         un_cond = {
-            "c_concat": None if params["guess_mode"] else [control_image],
+            "c_concat": None if self.exp_params["guess_mode"] else [control_image],
             "c_crossattn": [
                 self.model.get_learned_conditioning(
                      negtive_control_text   # [params["n_prompt"]] * B
@@ -3257,18 +3199,18 @@ class MM3DAdv_ATTACK:
         }
  
         self.model.control_scales = (
-            [params["strength"] * (0.825 ** float(12 - i)) for i in range(13)]
-            if params["guess_mode"]
-            else [params["strength"]] * 13
+            [self.exp_params["strength"] * (0.825 ** float(12 - i)) for i in range(13)]
+            if self.exp_params["guess_mode"]
+            else [self.exp_params["strength"]] * 13
         ) 
         # 切换扩散部分放在GPU
-        if params["save_memory"]:
+        if self.exp_params["save_memory"]:
             self.model.low_vram_shift(is_diffusing=True)
         st_time=time.time()
         with torch.no_grad():
-            samples, intermediates = self.ddim_sampler.sample(params["ddim_steps"], B,
-                                                    shape, cond, verbose=False, eta=params["eta"],
-                                                    unconditional_guidance_scale=params["scale"],
+            samples, intermediates = self.ddim_sampler.sample(self.exp_params["ddim_steps"], B,
+                                                    shape, cond, verbose=False, eta=self.exp_params["eta"],
+                                                    unconditional_guidance_scale=self.exp_params["scale"],
                                                     unconditional_conditioning=un_cond)            
         
         
@@ -3283,156 +3225,7 @@ class MM3DAdv_ATTACK:
         controlnet_adv_sample=torch.clamp(controlnet_adv_sample,0,1)
 
         # 返回0-1的tensor
-        return controlnet_adv_sample,control_image
-
-
-    def mask_generate(self,
-                      background_imag,
-                      result_gt=None,
-                      object_class=None,
-                      mask_type=0,
-                      connected_component=1,
-                      mutil_mask=False,
-                      ):
-        '''
-        参数：
-            background_imag: 背景图像
-            images_path: 输出图像路径，如果为None，则不保存
-            mask_type: 0-单目标的mask,1-多个目标的mask
-            connected_component: 0-不进行连通性处理,1-进行连通性处理,针对单个目标的情况
-        '''
-        if len(result_gt['boxes'])==0:
-            return None
-        if mask_type==0:
-            # 过滤筛选出最大的物体
-            result_gt,object_class=filter_max_box_per_batch(result_gt,object_class)      
-    
-
-        input_boxes_list=result_gt['boxes']
-        # 如果没有，直接跳过
-        if len(input_boxes_list[0])==0:
-            
-            return None
-        """
-            ====================================================
-            =========== 利用sam 模型，得到图像掩码 ===============
-            ====================================================
-        """
-        # 基于输入的background_imag，利用sam，得到mask，返回mask。
-        # 模型初始化
-        sam_predicter=init_sam(model_type=self.sam_model_type, 
-                               checkpoint_path=self.sam_checkpoint_path)
-        # 处理,注意mask——logic 的维度，是否是多个通道
-        
-        #sam_masks_logic_mutil_list 列表里面，为numpy，N*H*W
-        sam_img_np, \
-        sam_masks_logic_mutil_list, \
-        sam_masks_tensor_all,\
-        sam_scores_all_list=segment_tensor(predictor=sam_predicter, 
-                                                    tensor_img=background_imag,
-                                                    input_labels_batch=object_class,
-                                                    input_boxes_batch=input_boxes_list
-                                                    ,mutil_mask=mutil_mask)
-        
-        
-        # visualize_sam(background_imag, masks_logic_mutil, scores)
-        destroy_sam(sam_predicter)
-
-
-        # control 处理
-
-        # # mask 选择
-        # mask_logic_np_select, mask_tensor_select=select_mask_by_criteria(
-        #     masks_logic_mutil_all=sam_masks_logic_mutil_list,
-        #     masks_tensor_all=sam_masks_tensor_all,
-        #     scores_all=sam_scores_all_list,
-        #     exp_path=all_exp_root,
-        #     mask_select_statues=mask_select_statues
-        # )
-        mask_logic_np_select=np.concatenate(sam_masks_logic_mutil_list, axis=0)
-        if connected_component==1:
-            mask_logic_np_select=get_largest_connected_component(mask_logic_np_select)
-
-
-        return mask_logic_np_select,result_gt,object_class
-
-
-    def canny_get_mask(self,
-                      background_imag,
-                      mask=None,
-                      canny_type=0,
-                      with_mask_edge=False,
-                      with_content_canny=True,
-                      blur_status=True,
-                      kern_size=5,
-                      canny_low=50,
-                      canny_high=150
-                      ):
-        '''
-        参数：
-            background_imag: 背景图像
-            images_path: 输出图像路径，如果为None，则不保存
-            canny_type: 0-按照比例缩放,1-不缩放
-        '''
-            
-        # 提取物体
-        B,C,H,W=background_imag.shape
-        # 默认使用0填充
-        object_image=extract_mask_content(background_imag,mask,mask_value=0)
-        object_image,rect_coord_list=crop_mask_region(object_image,mask)
-        if canny_type==0 or canny_type==2: 
-            object_image,resize_scale=resize_images_keep_aspect(object_image,(H,W))
-        elif canny_type==1:
-            # 不等比例缩放
-            rect_list=[(H,W) for i in range(B)]
-            object_image,resize_scale=resize_images(object_image,rect_list)
-        else:
-            resize_scale=1
-
-        canny_for_visual,control_image=canny_with_mask_invert(background_imag=object_image,
-                                                              with_mask_edge=with_mask_edge,
-                                                              with_content_canny=with_content_canny,
-                                                              blur_k_size=kern_size,
-                                                              canny_high=canny_high,
-                                                              canny_low=canny_low,
-                                                              blur_status=blur_status)
-
-        return control_image,rect_coord_list,resize_scale
-
-    def init_tex_postprocess(self,
-            init_texture,
-            background_imag,
-            mask_np,
-            rect_list=None,
-            resize_scale=None,
-            statues=0
-        ):
-        """
-        初始化纹理
-        参数：
-            init_texture: 初始纹理
-            background_imag: 背景图像
-            rect_list: 矩形框列表
-            all_exp_root: 所有实验根目录
-            statues: 0-表示需要缩放,1
-        """
-        if statues==0 or statues==2: 
-            
-            init_texture=resized_images(init_texture,resize_scale)
-            init_texture=paste_images_to_background_no_scale(init_texture,rect_list,background_imag)
-
-        elif statues==1:
-            shale_list=[ (temp[3]-temp[1]  ,temp[2]-temp[0])  for temp in    rect_list]
-            init_texture,_=resize_images(init_texture,shale_list)
-            init_texture=paste_images_to_background_no_scale(init_texture,rect_list,background_imag)
-        init_texture=batched_tensor_mask_overlay(background_imag,
-                                                    init_texture,
-                                                    mask_np)
-
-        return init_texture
-
-
-
+        return controlnet_adv_sample
 
 
     def to_imgTensor_from_numpy_int8(self, image):
@@ -3453,34 +3246,6 @@ class MM3DAdv_ATTACK:
         return tensor.unsqueeze(0)
     
 
-    def generate_edge_control_from_image(self, image,file_path=None):
-        '''
-        作用：预处理图像，返回边缘图和边缘的control
-        参数：
-        image: 输入的图像
-        返回：
-        detected_map: 边缘图(size: [H, W])
-        control: 边缘的control(size: [num_samples, 3, H, W])
-        '''
-        # resize,opencv 格式
-        
-        H, W, C = image.shape
-        # 使用opencv 进行边缘检测
-        canny_map = cv2.Canny(image, 100, 200)
-        # 黑白交换（位运算反转）
-        detected_single_map = cv2.bitwise_not(canny_map)
-        detected_map = np.stack([detected_single_map]*3, axis=-1)
-        if file_path is not None:
-            cv2.imwrite(file_path,detected_map)
-        # detected_map = np.zeros_like(image, dtype=np.uint8)
-        # detected_map[np.min(image, axis=2) < 127] = 255
-
-        control = torch.from_numpy(detected_map.copy()).float().cuda() / 255.0
-        control = torch.stack([control for _ in range(self.default_params["num_samples"])], dim=0)
-        control = einops.rearrange(control, 'b h w c -> b c h w').clone()
-
-        return detected_map,control
-    
     # 将图片转化为latent
     def imgTensor_to_latent(self, img,scale=0.18215):
         '''
@@ -3556,6 +3321,246 @@ class MM3DAdv_ATTACK:
             np_array = np_array.squeeze(0)  # 从 [1, H, W, C] 变为 [H, W, C]
 
         return np_array
+
+
+
+    def optim_prepare(self,
+        ini_texture=None,
+        data_type=None):
+        # ========== 1. 新增AMP/BF16参数解析 ==========
+        use_amp = self.exp_params.get("use_amp", False)  # 是否启用AMP
+        use_bf16 = self.exp_params.get("use_bf16", False)  # 是否启用BF16（优先级高于FP32）
+        assert not (use_amp and use_bf16), "AMP和BF16不能同时启用"
+
+        # ========== 2. 设备和精度初始化 ==========
+        if device is None:
+             optim_device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        else:
+            optim_device = device
+
+        # 精度适配：BF16 / FP32
+        if use_bf16 and torch.cuda.is_bf16_supported():
+            optim_data_type = torch.bfloat16
+        elif data_type is not None:
+            optim_data_type = data_type
+        else:
+            optim_data_type = torch.float32
+
+        # ========== 3. AMP GradScaler初始化（仅AMP模式） ==========
+        scaler = GradScaler() if use_amp else None
+
+        # ========== 原有逻辑：数据预处理 ==========
+
+        
+
+
+        # 数据移至设备并转换精度
+        adv_init_tensor = move_to_gpu_and_cast_dtype(ini_texture, optim_device, optim_data_type)
+        adv_init_tensor_gt = adv_init_tensor.clone()
+
+
+        # VAE初始化
+        vae_optim = None
+        if self.exp_params["optim_object_type"] != 1:
+            vae_optim = VAEInferencer(model_name=self.vae_model_path, dtype=optim_data_type)
+
+        # 优化器初始化
+        if self.exp_params["optim_object_type"] == 0:
+            # VAE latent优化
+            adv_init_latent = vae_optim.encode_infer(adv_init_tensor * 2 - 1)
+            adv_init_latent = move_to_gpu_and_cast_dtype(adv_init_latent, optim_device, optim_data_type)
+            adv_init_latent = adv_init_latent.clone().detach()
+            adv_init_latent.requires_grad = True
+            optimizer = torch.optim.Adam([adv_init_latent], lr=self.exp_params["lr"])
+        else:
+            # RGB优化
+            adv_init_tensor.requires_grad = True
+            optimizer = torch.optim.Adam([adv_init_tensor], lr=self.exp_params["lr"])
+
+        # 学习率调度器
+        scheduler = StepLR(
+            optimizer,
+            step_size=self.exp_params["lr_step"],
+            gamma=self.exp_params["lr_decay"]
+        )
+
+        # 损失函数初始化（适配精度）
+        cross_entro_loss = YOLOv11DetectionLoss(**self.detect_params, **self.exp_params).to(optim_device, dtype=optim_data_type)
+        attr_loss_l2 = nn.MSELoss().to(optim_device, dtype=optim_data_type) if self.exp_params["attribution_loss_weight"] > 0 else None
+        TV_Loss = TVLoss().to(optim_device, dtype=optim_data_type) if self.exp_params["TV_loss_weight"] > 0 else None
+        conext_loss_l2 = MaskedL1L2Loss().to(optim_device, dtype=optim_data_type) if self.exp_params["conext_loss_weight"] > 0 else None
+        perceptual_loss = LearnedPerceptualImagePatchSimilarity(
+            net_type="vgg", normalize=True
+        ).to(optim_device, dtype=optim_data_type) if self.exp_params["perceptual_loss_weight"] > 0 else None
+
+        detect_model_type = self.detect_params["attack_model"]["model_type"]
+
+        # pr_scale=torch.tensor(mask_pre[0])
+        # pr_scale= 1 #1/pr_scale # 单位像素感知损失差距，所以需要除以比例
+
+        # data_load 初始化
+        train_loader ,val_loader=build_RGBCameraPose_dataloader(
+                train_root_dir=self.exp_params["train_root_dir"],
+                val_root_dir=self.exp_params["val_root_dir"],
+                batch_size=self.exp_params["batch_size"],
+                num_workers=self.exp_params["num_workers"],
+                transform=None)
+        
+
+
+        self.optim.optim_device= optim_device
+        self.optim.optim_data_type= optim_data_type
+        # loss
+        self.optim.cross_entro_loss= cross_entro_loss
+        self.optim.attr_loss_l2= attr_loss_l2
+        self.optim.TV_Loss= TV_Loss
+        self.optim.conext_loss_l2= conext_loss_l2
+        self.optim.perceptual_loss= perceptual_loss
+        # related model
+        self.optim.vae_optim= vae_optim
+        self.optim.detect_model_type= detect_model_type
+        # optimizer and scheduler
+        self.optim.optimizer= optimizer
+        self.optim.scheduler= scheduler
+        # scaler
+        self.optim_scaler= scaler
+
+        # related tensor
+        self.optim.adv_init_tensor_gt= adv_init_tensor_gt
+        self.optim.adv_init_tensor= adv_init_tensor
+        self.optim.adv_init_latent= adv_init_latent
+
+        # loader
+        self.optim.train_loader= train_loader
+        self.optim.val_loader= val_loader
+        mesh_model_t=load_obj_model(self.exp_params["mesh_model_path"], 
+                                optim_device)
+        self.optim.mesh_model = mesh_model_t.extend(self.exp_params["batch_size"])
+
+
+    def optim_step(self, step):
+
+
+        self.optim.optimizer.zero_grad()
+        use_amp = self.exp_params.get("use_amp", False)  # 是否启用AMP
+        use_bf16 = self.exp_params.get("use_bf16", False)  # 是否启用BF16（优先级高于FP32）
+
+
+        # ========== 前向传播（AMP上下文） ==========
+        with autocast(device_type="cuda",
+                        enabled=use_amp,
+                        dtype=torch.bfloat16 if use_bf16 else torch.float16):
+            # 生成对抗样本
+            if self.exp_params ["optim_object_type"] == 0:
+                adv_tensor_generate01 = self.optim.vae_optim.decode_infer(self.optim.adv_init_latent)
+                adv_tensor_generate = (adv_tensor_generate01 + 1) / 2
+            elif self.exp_params["optim_object_type"] == 1:
+                adv_tensor_generate = self.optim.adv_init_tensor
+            elif self.exp_params["optim_object_type"] == 2:
+                adv_init_tensor1 = self.optim.adv_init_tensor * 2 - 1
+                adv_tensor_generate01 = self.optim.vae_optim.infer(adv_init_tensor1, sample_posterior=False)
+                adv_tensor_generate = (adv_tensor_generate01 + 1) / 2
+
+            # render 渲染
+            adv_com_tensor_rendered = 
+
+            # 检测模型前向
+            result_epoch, _ = self.optim.detect_model.detect_eval(
+                adv_com_tensor_rendered,
+                file_path=all_exp_root,
+                file_name='result_generate.jpg',
+                grad_status=True,
+                model_type=detect_model_type
+            )
+
+            # 归因损失计算
+            attributions_epoch = None
+
+
+
+            # 各损失计算
+            attr_loss = torch.tensor(0.0, device=optim_device, dtype=optim_data_type)
+            if self.exp_params["attribution_loss_weight"] > 0 and attributions_epoch is not None and attributions_gt is not None:
+                attr_loss = attr_loss_l2(attributions_epoch, attributions_gt)
+
+            tv_loss = torch.tensor(0.0, device=optim_device, dtype=optim_data_type)
+            if self.exp_params["TV_loss_weight"] > 0:
+                tv_loss = TV_Loss(adv_tensor_optim)
+
+            conext_loss = torch.tensor(0.0, device=optim_device, dtype=optim_data_type)
+            if self.exp_params["conext_loss_weight"] > 0:
+                conext_loss = conext_loss_l2(adv_tensor_optim, adv_init_tensor_gt, mask)
+
+            pr_loss = torch.tensor(0.0, device=optim_device, dtype=optim_data_type)
+            if  ["perceptual_loss_weight"] > 0 and ref_tenture is not None:
+                pr_loss = perceptual_loss(normalize_to_01(adv_tensor_optim), ref_tenture)
+
+            # 检测损失
+            loss, loss_dict = cross_entro_loss(result_epoch, result_gt)
+
+            # 总损失
+            total_loss = (
+                self.exp_params["attribution_loss_weight"] * attr_loss
+                + self.exp_params["TV_loss_weight"] * tv_loss
+                + self.exp_params["perceptual_loss_weight"] * pr_loss*pr_scale
+                + self.exp_params["conext_loss_weight"] * conext_loss
+                + self.exp_params["class_loss_weight"]*loss_dict['class_loss']
+            )
+
+        # ========== 反向传播 + 优化（AMP适配） ==========
+        if use_amp:
+            # AMP模式：缩放梯度避免下溢
+            self.optim.scaler.scale(total_loss).backward()
+            self.optim.scaler.step(self.optim.optimizer)
+            self.optim.scaler.update()
+        else:
+            # 普通模式/BF16模式
+            total_loss.backward()
+            self.optim.optimizer.step()
+
+        # 学习率调度
+        self.optim.scheduler.step()
+
+        # 裁剪参数范围
+        if self.exp_params["optim_object_type"] != 0:
+            self.optim.adv_init_tensor.data = torch.clamp(self.optim.adv_init_tensor.data, 0.0, 1.0)
+
+
+
+   
+
+
+    def generate_adversarial_com(self,control_image):
+        """
+        生成对抗伪装
+        
+            
+        """
+
+        """
+            ====================================================
+            =========== controlnet 的初始化,采样 ===============
+            ====================================================
+        """
+
+
+        cam_target=[self.adv_params["cam_target_class"]]*self.exp_params["batch_size"]
+        controlnet_adv_texture=self.init_tex_generate(
+                                    control_image=control_image,
+                                cam_target_class=cam_target,
+                                ref_class=None, # object_class
+                                negtive_class='car')
+
+
+
+
+        self.optim_prepare(ini_texture=controlnet_adv_texture)
+                        
+        return 
+
+
+        
+
 
 
 

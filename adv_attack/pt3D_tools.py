@@ -11,8 +11,8 @@ from pytorch3d.renderer import (
     PointLights,
     look_at_view_transform,
     TexturesVertex,
-    PerspectiveCameras
-)
+    PerspectiveCameras,
+    TexturesUV,TexturesVertex, TexturesAtlas)
 import numpy as np
 from PIL import Image
 import os
@@ -576,6 +576,150 @@ def render_process(
     return rgb_images
 
 
+# def apply_texture_to_mesh(
+#     object_mesh,
+#     texture,  # 纹理张量 (B, C, H, W) 或 None，C=3，范围[0,1]
+#     device):
+#     """
+#     将纹理张量（B×C×H×W）映射到 3D 网格（Meshes），返回带纹理的新 Meshes 对象
+#     兼容所有 PyTorch3D 纹理类型：TexturesUV/TexturesAtlas/TexturesVertex
+#     核心逻辑：
+#         1. TexturesAtlas/TexturesUV → 复用原有 UV 坐标，绑定新纹理
+#         2. TexturesVertex/无纹理 → 降级为顶点颜色映射
+#         3. 支持批量纹理（B 需与 mesh 批量大小匹配）
+#     参数：
+#         object_mesh: 原始 3D 网格（Meshes 对象）
+#         texture: 纹理张量，形状 (B, 3, H, W)，float32，范围 [0,1]；传 None 则返回原 mesh
+#         device: 计算设备（cpu/cuda）
+#     返回：
+#         Meshes: 带纹理的新网格对象（不修改原始 mesh）
+#     """
+#     # 1. 边界条件：无纹理时返回原 mesh 副本
+#     if texture is None:
+#         return object_mesh.clone()
+    
+
+#     # 4. 复制原始 mesh，避免修改原对象
+#     new_mesh = object_mesh.clone().to(device)
+    
+#     # 5. 纹理格式转换：B×C×H×W → B×H×W×C（适配 PyTorch3D 纹理格式）
+#     texture = texture.permute(0, 2, 3, 1).contiguous()  # (B, H, W, 3)
+    
+
+#     # ========== 兼容 TexturesAtlas/TexturesUV 纹理（复用 UV 坐标） ==========
+#     has_uv = False
+#     verts_uvs = None
+#     faces_uvs = None
+    
+#     # 处理 TexturesAtlas 类型（你的场景）
+#     if isinstance(new_mesh.textures, TexturesAtlas):
+
+#         # TexturesAtlas 的 UV 坐标存储在 atlas_uvs_padded()
+#         verts_uvs = new_mesh.textures.atlas_uvs_padded()  # (B, V, 2)
+#         # TexturesAtlas 无 faces_uvs，复用原 faces 索引
+#         faces_uvs = new_mesh.faces_padded()  # (B, F, 3)
+#         has_uv = True
+    
+#     # 处理 TexturesUV 类型
+#     elif isinstance(new_mesh.textures, TexturesUV):
+
+#         verts_uvs = new_mesh.textures.verts_uvs_padded()  # (B, V, 2)
+#         faces_uvs = new_mesh.textures.faces_uvs_padded()  # (B, F, 3)
+#         has_uv = True
+    
+#     # 有 UV 坐标时，绑定新的 UV 纹理
+#     if has_uv and verts_uvs is not None and faces_uvs is not None:
+#         # 创建 UV 纹理对象（统一用 TexturesUV，兼容所有 UV 坐标）
+#         texture_uv = TexturesUV(
+#             maps=texture.to(device),       # (B, H, W, 3) 纹理图像
+#             verts_uvs=verts_uvs.to(device),# 顶点 UV 坐标
+#             faces_uvs=faces_uvs.to(device) # 面 UV 索引
+#         )
+#         new_mesh.textures = texture_uv
+
+    
+#     # ========== 降级：顶点颜色映射（无 UV 坐标/TexturesVertex 时） ==========
+#     else:
+
+#         # 获取每个 mesh 的顶点数
+#         verts_padded = new_mesh.verts_padded()  # (B, V, 3)
+#         B, V, _ = verts_padded.shape
+        
+#         # 将纹理图像平均采样到顶点（适配批量）
+#         vertex_colors = []
+#         for b in range(B):
+#             # 单批次纹理：(H, W, 3) → 展平为 (H*W, 3)
+#             tex_flat = texture[b].reshape(-1, 3)
+#             # 均匀采样到顶点（避免随机采样的不确定性）
+#             sample_step = max(1, tex_flat.shape[0] // V)
+#             sample_idx = torch.arange(0, tex_flat.shape[0], sample_step)[:V].to(device)
+#             vert_color = tex_flat[sample_idx]  # (V, 3)
+#             # 补充不足的顶点（若纹理像素数 < 顶点数）
+#             if len(vert_color) < V:
+#                 pad_num = V - len(vert_color)
+#                 vert_color = torch.cat([vert_color, vert_color[:pad_num]], dim=0)
+#             vertex_colors.append(vert_color)
+        
+#         # 拼接为批量顶点颜色：(B, V, 3)
+#         vertex_colors = torch.stack(vertex_colors, dim=0)
+#         # 创建顶点颜色纹理
+#         texture_vertex = TexturesVertex(verts_colors=vertex_colors.to(device))
+#         new_mesh.textures = texture_vertex
+
+    
+#     return new_mesh
+
+def apply_texture_to_mesh(
+    object_mesh,
+    texture,  # 纹理张量 (B, C, H, W) 或 None，C=3，范围[0,1]
+    device):
+    """
+    将纹理张量（B×C×H×W）映射到 3D 网格（Meshes），返回带纹理的新 Meshes 对象
+    核心逻辑：统一使用顶点颜色映射（兼容所有 PyTorch3D 版本和纹理类型）
+    参数：
+        object_mesh: 原始 3D 网格（Meshes 对象）
+        texture: 纹理张量，形状 (B, 3, H, W)，float32，范围 [0,1]；传 None 则返回原 mesh
+        device: 计算设备（cpu/cuda）
+    返回：
+        Meshes: 带纹理的新网格对象（不修改原始 mesh）
+    """
+    # 1. 边界条件：无纹理时返回原 mesh 副本
+    if texture is None:
+        return object_mesh.clone()
+
+    # 2. 复制原始 mesh，避免修改原对象
+    new_mesh = object_mesh.clone().to(device)
+    
+    # 3. 纹理格式转换：B×C×H×W → B×H×W×C（适配 PyTorch3D 纹理格式）
+    texture = texture.permute(0, 2, 3, 1).contiguous()  # (B, H, W, 3)
+
+    # ========== 统一使用顶点颜色映射（兼容所有场景） ==========
+    # 获取每个 mesh 的顶点数
+    verts_padded = new_mesh.verts_padded()  # (B, V, 3)
+    B, V, _ = verts_padded.shape
+    
+    # 将纹理图像平均采样到顶点（适配批量）
+    vertex_colors = []
+    for b in range(B):
+        # 单批次纹理：(H, W, 3) → 展平为 (H*W, 3)
+        tex_flat = texture[b].reshape(-1, 3)
+        # 均匀采样到顶点（避免随机采样的不确定性）
+        sample_step = max(1, tex_flat.shape[0] // V)
+        sample_idx = torch.arange(0, tex_flat.shape[0], sample_step)[:V].to(device)
+        vert_color = tex_flat[sample_idx]  # (V, 3)
+        # 补充不足的顶点（若纹理像素数 < 顶点数）
+        if len(vert_color) < V:
+            pad_num = V - len(vert_color)
+            vert_color = torch.cat([vert_color, vert_color[:pad_num]], dim=0)
+        vertex_colors.append(vert_color)
+    
+    # 拼接为批量顶点颜色：(B, V, 3) → 符合官方文档的 (N, V, C) 格式
+    vertex_colors = torch.stack(vertex_colors, dim=0).to(device)
+    # 创建顶点颜色纹理（关键修改：使用 verts_features 替代 verts_colors）
+    texture_vertex = TexturesVertex(verts_features=vertex_colors)
+    new_mesh.textures = texture_vertex
+
+    return new_mesh
 
 def load_parma_and_render_main(object_mesh,
                                backgroud,
@@ -670,10 +814,16 @@ def main_debug2():
     backgroud_paths_list=[RGB_PATH,RGB_PATH.replace("fixed_000","fixed_001")]
 
     backgroud_images=load_background_images(backgroud_paths_list,device=device)
+    # 生成对应大小的render texture
+    # 随机
+    tex=torch.rand_like(backgroud_images).to(device)
+    # tex=torch.ones_like(backgroud_images).to(device)
 
     new_mesh = mesh_model.extend(len(camera_paths_list))
+
+    new_mesh1=apply_texture_to_mesh(new_mesh,tex,device)
     
-    images_rnedered = load_parma_and_render_main(object_mesh=new_mesh,
+    images_rnedered = load_parma_and_render_main(object_mesh=new_mesh1,
                                                  backgroud=backgroud_images,
                                                  path_camera_pose=camera_paths_list,
                                                  image_size=IMG_SIZE,

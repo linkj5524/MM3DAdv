@@ -3630,3 +3630,147 @@ def calculate_resize_scale_back(resize_scale):
         raise TypeError(
             f"不支持的resize_scale类型：{type(resize_scale)}，仅支持torch.Tensor或包含元组的list！"
         )
+
+
+
+
+class RGBCameraPoseDataset(Dataset):
+    """
+    加载RGB图像和对应同名相机位姿.npz文件路径的数据集
+    目录结构要求：
+        train_root_dir/
+            rgb/
+                img_000.png
+                img_001.png
+                ...
+            camera_pose/
+                img_000.npz
+                img_001.npz
+                ...
+        val_root_dir/
+            rgb/
+            camera_pose/
+    """
+    def __init__(
+        self,
+        root_dir: str,
+        transform=None,  # 可选：图像变换（如Resize、ToTensor等）
+        img_ext: str = ".png",  # RGB图像后缀
+        pose_ext: str = ".npz"  # 位姿文件后缀
+    ):
+        self.root_dir = root_dir
+        self.transform = transform
+        self.img_ext = img_ext
+        self.pose_ext = pose_ext
+
+        # 1. 定义RGB和位姿文件夹路径
+        self.rgb_dir = os.path.join(root_dir, "rgb")
+        self.pose_dir = os.path.join(root_dir, "camera_pose")
+        
+        # 2. 校验文件夹是否存在
+        assert os.path.exists(self.rgb_dir), f"RGB文件夹不存在：{self.rgb_dir}"
+        assert os.path.exists(self.pose_dir), f"位姿文件夹不存在：{self.pose_dir}"
+
+        # 3. 获取所有RGB图像文件名（过滤后缀）
+        self.rgb_filenames = [
+            f for f in os.listdir(self.rgb_dir)
+            if f.endswith(self.img_ext) and os.path.isfile(os.path.join(self.rgb_dir, f))
+        ]
+        # 按文件名排序（确保顺序一致）
+        self.rgb_filenames.sort()
+        
+        # 4. 校验每个RGB图像对应存在位姿文件
+        self.valid_samples = []
+        for rgb_fn in self.rgb_filenames:
+            # 提取文件名前缀（去掉后缀）
+            prefix = os.path.splitext(rgb_fn)[0]
+            pose_fn = prefix + self.pose_ext
+            pose_path = os.path.join(self.pose_dir, pose_fn)
+            
+            if os.path.exists(pose_path):
+                self.valid_samples.append({
+                    "rgb_path": os.path.join(self.rgb_dir, rgb_fn),
+                    "pose_path": pose_path,
+                    "prefix": prefix
+                })
+            else:
+                print(f"警告：{rgb_fn} 无对应位姿文件 {pose_fn}，跳过该样本")
+        
+        assert len(self.valid_samples) > 0, f"无有效样本！检查 {root_dir} 下的rgb和camera_pose文件夹"
+        print(f"数据集初始化完成：{root_dir} → 有效样本数：{len(self.valid_samples)}")
+
+    def __len__(self) -> int:
+        """返回数据集总样本数"""
+        return len(self.valid_samples)
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, str]:
+        """
+        获取单个样本
+        返回：
+            img_tensor: 处理后的RGB图像张量（C×H×W），范围[0,1]（若未指定transform则为PIL图像）
+            pose_path: 对应相机位姿.npz文件的完整路径（字符串）
+        """
+        sample = self.valid_samples[idx]
+        rgb_path = sample["rgb_path"]
+        pose_path = sample["pose_path"]
+
+        # 1. 加载RGB图像（RGB模式）
+        img = Image.open(rgb_path).convert("RGB")
+        
+        # 2. 应用图像变换（如Resize、ToTensor等）
+        if self.transform is not None:
+            img = self.transform(img)
+        else:
+            # 默认转换为张量（C×H×W，范围[0,1]）
+            img = torch.from_numpy(np.array(img)).permute(2, 0, 1).float() / 255.0
+
+        return img, pose_path
+
+
+def build_RGBCameraPose_dataloader(
+    train_root_dir: str,
+    val_root_dir: str,
+    batch_size: int = 4,
+    num_workers: int = 4,
+    transform=None
+) -> Tuple[DataLoader, DataLoader]:
+    """
+    构建训练/验证集的DataLoader
+    参数：
+        train_root_dir: 训练集根目录
+        val_root_dir: 验证集根目录
+        batch_size: 批次大小
+        num_workers: 加载数据的线程数
+        transform: 图像变换（如torchvision.transforms.Compose）
+    返回：
+        train_loader: 训练集DataLoader
+        val_loader: 验证集DataLoader
+    """
+    # 构建训练集
+    train_dataset = RGBCameraPoseDataset(
+        root_dir=train_root_dir,
+        transform=transform
+    )
+    train_loader = DataLoader(
+        dataset=train_dataset,
+        batch_size=batch_size,
+        shuffle=True,  # 训练集打乱
+        num_workers=num_workers,
+        pin_memory=True,  # 加速GPU加载
+        drop_last=True  # 丢弃最后不完整批次
+    )
+
+    # 构建验证集
+    val_dataset = RGBCameraPoseDataset(
+        root_dir=val_root_dir,
+        transform=transform
+    )
+    val_loader = DataLoader(
+        dataset=val_dataset,
+        batch_size=batch_size,
+        shuffle=False,  # 验证集不打乱
+        num_workers=num_workers,
+        pin_memory=True
+    )
+
+    return train_loader, val_loader

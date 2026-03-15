@@ -1,0 +1,127 @@
+# config/attack_config.yaml
+
+
+common:
+  image_size : &img_size 512  # 定义锚点，后续可通过 *img_size 引用
+
+
+# 项目根路径
+root_path: "."  
+
+# 设备配置
+device: "cuda"  
+
+# 模型路径配置
+model_paths:
+  detect_model: "models/yolo11l.pt"    
+  sam_model: "models/sam_vit_h_4b8939.pth"
+  controlnet: "models/control_sd15_canny.pth"
+  blip_model: "models/Salesforceblip_image_captioning_large"
+  vae_model: "models/sd_vae_ft_mse"
+  inpaint_model: "models/sdxl_inpaint_model"
+  control_yaml_path: "./models/cldm_v15.yaml"
+# 模型类型配置
+model_types:
+  detect_model: "yolov11"
+  sam_model: "vit_h"
+
+# ADV_ATTACK的默认参数（新增）
+attak_params:
+  prompt: "match the edge contour exactly, 100% fit edge topology, covered with realistic jungle camouflage pattern, dense leaves and vine motifs, irregular earthy green-brown splotches, matte outdoor texture, high detail, 8k resolution, ultra sharp, photorealistic, crisp edges, seamless pattern"
+  a_prompt: ""
+  n_prompt: ". blurry, low resolution, ugly, deformed, noisy texture, pixelated, unrealistic, bad detail, distorted pattern, edge mismatch, pattern fragmentation, over-saturated colors, glossy surface, cartoonish, 3d render artifacts, extra edges, missing edges"
+  ddim_steps: 30
+  guess_mode: false
+  strength: 0.8 # 默认 1.0, 0.7 纹理更丰富
+  scale: 15   # 默认9
+  scale_optim: 9
+  seed: 42
+  eta: 0.0
+  save_memory: true
+  optim_epochs: 200
+  latent_fit_optim_epochs: 5
+  attribution_loss_weight: 0
+  TV_loss_weight: 0
+  lr: 0.5     #0.05   # 默认0.5
+  conext_loss_weight: 200 ## 默认 1：1000 默认2：2000
+  perceptual_loss_weight: 100 ## 默认1： 1000 默认2：1000
+  class_loss_weight : 1  # 1
+
+  lr_step: 40 # 10
+  lr_decay: 0.8
+  amp_status: true 
+
+  adv_loss_type: 2   
+
+  # 0:表示与gt的交叉熵最大；
+  # 1:表示最小化当前预测类别的置信度；
+  # 2：带有参考类型，最大化误导类别的置信度，最小化当前类别的置信度
+  optim_object_type: 0
+  # 0 表示优化latent
+  # 1 表示直接优化RGB图片
+  # 2 表示经过VAE，优化RGB图像
+  cam_target_class : "camouflage dog"
+  target_class: 16 # 目标类别，参考COCO类别对应
+  target_class_ref: 0 # 目标类别，参考COCO类别对应,
+  mask_type : 0  # sam 获取单个目标的mask，1 表示获取所有目标mask
+  connected_component : 0  # 对于单个目标，获取的mask，是否寻找最大连通区域的mask
+  canny_type : 1 # 0 表示对目标物体缩放后获取Canny，1 表示不按等比例，2 等比例，按照比例缩放尽量将object放到mask内,其他表示原始
+  canny_scale : 0.8
+  canny_low : 100  # 10  100 
+  canny_high : 200 # 200
+  kern_size : 7  # 11
+  canny_blur : true
+  canny_with_mask_edge : false # 默认false
+  canny_with_content_canny : true  # 默认true
+  ref_status : 0
+  use_amp : false
+  use_bf16 : true 
+
+  #### 后续三个目前没有用到，
+  adv_weight_class: 1
+  adv_weight_bbox_l1: 1 # 检测框的坐标损失
+  adv_weight_giou: 1 # IOU的损失
+  
+
+
+
+experiment_params:
+  experiment_path: "exp/260112_optim_imagenet"
+  
+  image_size: *img_size
+  dataset_path: "D:/FILELin/postgraduate/little_paper/imagenet2012/for_adv/all"
+  batch_size: 1
+  num_workers: 4
+
+
+ 
+# 检测模型参数
+detect_params:
+  conf_threshold: 0.25             
+  iou_threshold: 0.1
+  nclass_yaml_path: "./models/coco_class.yaml"
+  
+  image_size: *img_size
+  val_model1:
+    val_model1:
+      model_path: "./models/yolov8m.pt"
+      model_type: "yolov8"
+    val_model2:
+      model_path: ""
+      model_type: "fasterrcnn"
+    val_model3:
+      model_path: ""
+      model_type: "ssd300"
+    val_model4:
+      model_path: "./models/yolo11m.pt"
+      model_type: "yolov11"
+  attack_model: 
+    model_path: "./models/yolov8m.pt"
+    model_type: "yolov8"
+
+ 
+attribution_params:
+  steps : 40
+  batch_size: 40
+  alpha_star : 1.0
+  baseline : 0
