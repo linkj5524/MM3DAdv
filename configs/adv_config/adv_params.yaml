@@ -1,0 +1,17 @@
+# config/attack_config.yaml
+
+
+# ADV_ATTACK的默认参数（新增）
+attak_params:
+  prompt: "match the edge contour exactly, 100% fit edge topology, covered with realistic jungle camouflage pattern, dense leaves and vine motifs, irregular earthy green-brown splotches, matte outdoor texture, high detail, 8k resolution, ultra sharp, photorealistic, crisp edges, seamless pattern"
+  a_prompt: ""
+  n_prompt: ". blurry, low resolution, ugly, deformed, noisy texture, pixelated, unrealistic, bad detail, distorted pattern, edge mismatch, pattern fragmentation, over-saturated colors, glossy surface, cartoonish, 3d render artifacts, extra edges, missing edges"
+  ddim_steps: 30
+  guess_mode: false
+  strength: 0.8 # 默认 1.0, 0.7 纹理更丰富
+  scale: 15   # 默认9
+  scale_optim: 9
+  seed: 42
+  eta: 0.0
+  save_memory: true
+

@@ -1,0 +1,21 @@
+
+conf_threshold: 0.25             
+iou_threshold: 0.1
+nclass_yaml_path: "./configs/other_config/coco_class.yaml"
+
+val_model1:
+  val_model1:
+    model_path: "/root/autodl-fs/models_controlnet_adv/yolov8m.pt"
+    model_type: "yolov8"
+  val_model2:
+    model_path: ""
+    model_type: "fasterrcnn"
+  val_model3:
+    model_path: ""
+    model_type: "ssd300"
+  val_model4:
+    model_path: "/root/autodl-fs/models_controlnet_adv/yolo11m.pt"
+    model_type: "yolov11"
+attack_model: 
+  model_path: "/root/autodl-fs/models_controlnet_adv/yolov8m.pt"
+  model_type: "yolov8"

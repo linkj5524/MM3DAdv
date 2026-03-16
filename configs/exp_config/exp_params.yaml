@@ -1,0 +1,50 @@
+# config/attack_config.yaml
+
+
+image_size : 512  # 定义锚点，后续可通过 *img_size 引用
+
+
+device: "cuda"  
+# optim params
+optim_epochs: 20
+lr: 0.5     #0.05   # 默认0.5
+lr_step: 40 # 10
+lr_decay: 0.8
+
+
+
+# amp_status: true 
+use_amp : false
+use_bf16 : true 
+
+
+adv_loss_type: 2   
+
+# 0:表示与gt的交叉熵最大；
+# 1:表示最小化当前预测类别的置信度；
+# 2：带有参考类型，最大化误导类别的置信度，最小化当前类别的置信度
+optim_object_type: 0
+# 0 表示优化latent
+# 1 表示直接优化RGB图片
+# 2 表示经过VAE，优化RGB图像
+cam_target_class : "camouflage dog"
+target_class: 16 # 目标类别，参考COCO类别对应
+target_class_ref: 0 # 目标类别，参考COCO类别对应,
+
+
+
+
+TV_loss_weight: 0
+conext_loss_weight: 200 ## 默认 1：1000 默认2：2000
+perceptual_loss_weight: 100 ## 默认1： 1000 默认2：1000
+class_loss_weight : 1  # 1  
+
+
+experiment_path: "exp/260112_optim_test/"
+train_root_dir : "/root/autodl-fs/data/data_test/location_000_random"
+val_root_dir : "/root/autodl-fs/data/data_test/location_000_random"
+
+batch_size: 1
+num_workers: 4
+
+ 

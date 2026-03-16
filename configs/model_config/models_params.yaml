@@ -1,0 +1,14 @@
+
+
+# 模型路径配置
+model_paths: 
+  sam_model: "/root/autodl-fs/models_controlnet_adv/sam_vit_h_4b8939.pth"
+  controlnet: "/root/autodl-fs/models_controlnet_adv/control_sd15_canny.pth"
+  blip_model: "/root/autodl-fs/models_controlnet_adv/Salesforceblip_image_captioning_large"
+  vae_model: "/root/autodl-fs/models_controlnet_adv/sd_vae_ft_mse"
+  inpaint_model: "/root/autodl-fs/models_controlnet_adv/sdxl_inpaint_model"
+# 模型类型配置
+model_types:
+  sam_model: "vit_h"
+  controlnet: "./configs/controlnet_config/cldm_v15.yaml"
+
