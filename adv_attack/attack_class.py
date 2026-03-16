@@ -3418,8 +3418,7 @@ class MM3DAdv_ATTACK:
 
         for backgroud_images ,cameras_pose_path in self.optim.train_loader:
             # ========== 前向传播（AMP上下文） ==========
-            with autocast(device_type="cuda",
-                            enabled=use_amp,
+            with autocast(enabled=use_amp,
                             dtype=torch.bfloat16 if use_bf16 else torch.float16):
                 # 生成对抗样本
                 if self.exp_params ["optim_object_type"] == 0:
@@ -3435,10 +3434,12 @@ class MM3DAdv_ATTACK:
 
 
                 # resize
-                image_size=( self.exp_params["render_image_width"], self.exp_params["render_image_height"])
+                image_size=( self.exp_params["render_size"]["height"], 
+                            self.exp_params["render_size"]["width"])
                 # resize
-                adv_texture_resized = resize_image(adv_tensor_generate, 
-                                                   image_size)
+                adv_texture_resized = resize_tensor(adv_tensor_generate, 
+                                                   height=image_size[0], 
+                                                    width=image_size[1])
                 # render 渲染
                 # 初始化object mesh
 

@@ -4,7 +4,9 @@
 image_size:
   width: 512
   height: 512   
-
+render_size:
+  width: 1280
+  height: 720
 device: "cuda"  
 # optim params
 optim_epochs: 20

@@ -3774,3 +3774,79 @@ def build_RGBCameraPose_dataloader(
     )
 
     return train_loader, val_loader
+
+
+
+# def resize_tensor(adv_tensor_generate, height, width, mode='bilinear', align_corners=False):
+#     """
+#     调整批量图像张量尺寸（仅支持 4D 张量），保证梯度反向传播不中断
+    
+#     参数说明：
+#     - adv_tensor_generate: 输入批量张量，格式必须为 [B, C, H, W]（B=批量数，C=通道数，H/W=原尺寸）
+#     - height: 目标高度（int）
+#     - width: 目标宽度（int）
+#     - mode: 插值方式（默认 bilinear，必须为 PyTorch 可微分模式：bilinear/bicubic/nearest-exact 等）
+#     - align_corners: 对齐角落（仅 bilinear/bicubic 生效，默认 False，保证梯度稳定性）
+    
+#     返回值：
+#     - resized_tensor: 调整后的张量 [B, C, height, width]，梯度与输入张量连续
+#     """
+#     # 严格校验输入维度（仅处理 4D 批量张量）
+#     if len(adv_tensor_generate.shape) != 4:
+#         raise ValueError(f"输入必须是 4D 批量张量 [B, C, H, W]，当前维度为 {len(adv_tensor_generate.shape)}D")
+    
+#     # 核心：使用 F.interpolate（PyTorch 原生可微分操作，梯度不中断）
+#     # 注意：nearest 插值建议用 nearest-exact（PyTorch 1.10+），梯度更稳定
+#     if mode == 'nearest':
+#         mode = 'nearest-exact'
+    
+#     resized_tensor = F.interpolate(
+#         adv_tensor_generate,
+#         size=(height, width),  # 目标尺寸 (H, W)
+#         mode=mode,
+#         align_corners=align_corners if mode in ['bilinear', 'bicubic'] else None
+#     )
+    
+#     return resized_tensor
+
+
+def resize_tensor(adv_tensor_generate, height, width, mode='bilinear', align_corners=False):
+    """
+    调整批量图像张量尺寸（兼容 BFloat16 类型，保证梯度不中断）
+    
+    参数说明：
+    - adv_tensor_generate: 输入批量张量 [B, C, H, W]，支持 float32/float16/bfloat16
+    - height/width: 目标尺寸
+    - mode: 插值方式（默认 bilinear）
+    - align_corners: 对齐角落（默认 False）
+    
+    返回值：
+    - resized_tensor: 调整后的张量，类型与输入一致，梯度连续
+    """
+    # 1. 校验维度（仅处理 4D 批量张量）
+    if len(adv_tensor_generate.shape) != 4:
+        raise ValueError(f"输入必须是 4D 张量 [B, C, H, W]，当前维度：{len(adv_tensor_generate.shape)}D")
+    
+    # 2. 核心修复：BFloat16 转 Float32（插值操作支持的类型）
+    orig_dtype = adv_tensor_generate.dtype  # 保存原类型
+    if orig_dtype == torch.bfloat16:
+        tensor = adv_tensor_generate.to(torch.float32)
+    else:
+        tensor = adv_tensor_generate
+    
+    # 3. 插值操作（nearest 模式无需类型转换，可跳过）
+    if mode == 'nearest':
+        mode = 'nearest-exact'  # 梯度更稳定
+    
+    resized_tensor = F.interpolate(
+        tensor,
+        size=(height, width),
+        mode=mode,
+        align_corners=align_corners if mode in ['bilinear', 'bicubic'] else None
+    )
+    
+    # 4. 转回原类型（保证输出类型与输入一致，不影响后续计算）
+    if orig_dtype == torch.bfloat16:
+        resized_tensor = resized_tensor.to(orig_dtype)
+    
+    return resized_tensor
