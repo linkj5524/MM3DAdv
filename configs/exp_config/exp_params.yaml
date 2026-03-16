@@ -1,8 +1,9 @@
 # config/attack_config.yaml
 
 
-image_size : 512  # 定义锚点，后续可通过 *img_size 引用
-
+image_size:
+  width: 512
+  height: 512   
 
 device: "cuda"  
 # optim params

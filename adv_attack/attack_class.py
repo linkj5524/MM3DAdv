@@ -19,7 +19,8 @@ import sys
 from pytorch_lightning import seed_everything
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from torch.optim.lr_scheduler import StepLR, CosineAnnealingLR, CosineAnnealingWarmRestarts
-from torch.amp import autocast, GradScaler  
+# from torch.amp import autocast, GradScaler 
+from torch.cuda.amp import autocast, GradScaler 
 # 本地的包
 ## 添加本地包路径,即上一级的路径
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
