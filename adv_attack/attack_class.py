@@ -2989,7 +2989,7 @@ class MM3DAdv_ATTACK:
         self.adv_params=adv_params
 
         self.class_names_ymal=detect_params['nclass_yaml_path']
-
+        self.optim = type('OptimContainer', (), {})()  # 动态创建空对象
 
 
     # 初始化controlnet模型
@@ -2997,7 +2997,7 @@ class MM3DAdv_ATTACK:
         """初始化ControlNet模型"""
                 # 初始化模型
         config_path=self.model_params['model_types']['controlnet']
-        model_path=self.model_params['model_path']['controlnet']
+        model_path=self.model_params['model_paths']['controlnet']
         self.model = create_model(config_path).cpu()
         self.model.load_state_dict(load_state_dict(model_path, location='cuda'),strict=False)
         self.ddim_sampler = DDIMSampler(self.model)
@@ -3295,6 +3295,7 @@ class MM3DAdv_ATTACK:
 
 
     def optim_prepare(self,
+        device=None,
         ini_texture=None,
         data_type=None):
         # ========== 1. 新增AMP/BF16参数解析 ==========
@@ -3332,7 +3333,8 @@ class MM3DAdv_ATTACK:
         # VAE初始化
         vae_optim = None
         if self.exp_params["optim_object_type"] != 1:
-            vae_optim = VAEInferencer(model_name=self.vae_model_path, dtype=optim_data_type)
+            vae_model_path=self.model_params['model_paths']['vae_model']
+            vae_optim = VAEInferencer(model_name=vae_model_path, dtype=optim_data_type)
 
         # 优化器初始化
         if self.exp_params["optim_object_type"] == 0:
@@ -3356,7 +3358,7 @@ class MM3DAdv_ATTACK:
 
         # 损失函数初始化（适配精度）
         cross_entro_loss = YOLOv11DetectionLoss(**self.detect_params, **self.exp_params).to(optim_device, dtype=optim_data_type)
-        attr_loss_l2 = nn.MSELoss().to(optim_device, dtype=optim_data_type) if self.exp_params["attribution_loss_weight"] > 0 else None
+        
         TV_Loss = TVLoss().to(optim_device, dtype=optim_data_type) if self.exp_params["TV_loss_weight"] > 0 else None
         conext_loss_l2 = MaskedL1L2Loss().to(optim_device, dtype=optim_data_type) if self.exp_params["conext_loss_weight"] > 0 else None
         perceptual_loss = LearnedPerceptualImagePatchSimilarity(
@@ -3382,7 +3384,6 @@ class MM3DAdv_ATTACK:
         self.optim.optim_data_type= optim_data_type
         # loss
         self.optim.cross_entro_loss= cross_entro_loss
-        self.optim.attr_loss_l2= attr_loss_l2
         self.optim.TV_Loss= TV_Loss
         self.optim.conext_loss_l2= conext_loss_l2
         self.optim.perceptual_loss= perceptual_loss
@@ -3558,7 +3559,7 @@ class MM3DAdv_ATTACK:
         """
 
 
-        cam_target=[self.adv_params["cam_target_class"]]*self.exp_params["batch_size"]
+        cam_target=[self.exp_params["cam_target_class"]]*self.exp_params["batch_size"]
         controlnet_adv_texture=self.init_tex_generate(
                                     control_image=control_image,
                                 cam_target_class=cam_target,

@@ -48,4 +48,4 @@ val_root_dir : "/root/autodl-fs/data/data_test/location_000_random"
 batch_size: 1
 num_workers: 4
 
- 
+mesh_model_path: "/root/autodl-fs/data/object_model/TeslaModel3_blue.obj"

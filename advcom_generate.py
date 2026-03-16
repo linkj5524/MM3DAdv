@@ -86,8 +86,8 @@ if __name__ == '__main__':
                   detect_params=detect_params)
 
     imgsize_width,imgsize_height=attack.exp_params["image_size"].values()
-    ref_path=r"data/control1.jpg"
-    ref_tenture=cv2.imread(ref_path,cv2.IMREAD_GRAYSCALE)
+    ref_path=r"./test_imgs/control_ref.jpg"
+    ref_tenture=cv2.imread(ref_path)
     ref_tenture=cv2.resize(ref_tenture, (imgsize_width, imgsize_height))
     ref_canny=cv2_to_tensor(ref_tenture)
     if ref_canny.dim()==3:  # 添加维度

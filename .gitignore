@@ -4,7 +4,7 @@ training/
 lightning_logs/
 image_log/
 exp/
-
+pretrain_model/
 *.pth
 *.pt
 *.ckpt
