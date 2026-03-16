@@ -3371,12 +3371,14 @@ class MM3DAdv_ATTACK:
         # pr_scale= 1 #1/pr_scale # 单位像素感知损失差距，所以需要除以比例
 
         # data_load 初始化
+        transforms_list = [
+            transforms.ToTensor()]
         train_loader ,val_loader=build_RGBCameraPose_dataloader(
                 train_root_dir=self.exp_params["train_root_dir"],
                 val_root_dir=self.exp_params["val_root_dir"],
                 batch_size=self.exp_params["batch_size"],
                 num_workers=self.exp_params["num_workers"],
-                transform=None)
+                transform= transforms_list)
         
 
 
@@ -3417,6 +3419,7 @@ class MM3DAdv_ATTACK:
         use_bf16 = self.exp_params.get("use_bf16", False)  # 是否启用BF16（优先级高于FP32）
 
         for backgroud_images ,cameras_pose_path in self.optim.train_loader:
+            backgroud_images=backgroud_images.to(self.optim.optim_device)
             # ========== 前向传播（AMP上下文） ==========
             with autocast(enabled=use_amp,
                             dtype=torch.bfloat16 if use_bf16 else torch.float16):
