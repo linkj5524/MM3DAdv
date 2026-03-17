@@ -1,9 +1,8 @@
 # config/attack_config.yaml
 
 
-image_size:
-  width: 512
-  height: 512   
+image_size : 512 
+
 render_size:
   width: 1280
   height: 720
@@ -44,8 +43,8 @@ class_loss_weight : 1  # 1
 
 
 experiment_path: "exp/260112_optim_test/"
-train_root_dir : "/root/autodl-fs/data/data_test/location_000_random"
-val_root_dir : "/root/autodl-fs/data/data_test/location_000_random"
+train_root_dir : "/root/autodl-fs/data/data_test/carla_data/vehicle_tesla_model3/location_000"
+val_root_dir : "/root/autodl-fs/data/data_test/carla_data/vehicle_tesla_model3/location_000"
 
 batch_size: 1
 num_workers: 4

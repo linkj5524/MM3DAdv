@@ -3371,8 +3371,9 @@ class MM3DAdv_ATTACK:
         # pr_scale= 1 #1/pr_scale # 单位像素感知损失差距，所以需要除以比例
 
         # data_load 初始化
-        transforms_list = [
-            transforms.ToTensor()]
+        transforms_list = transforms.Compose([
+                    transforms.ToTensor()  # 转为张量 [C, H, W]，值归一化到 [0,1]
+                    ]) 
         train_loader ,val_loader=build_RGBCameraPose_dataloader(
                 train_root_dir=self.exp_params["train_root_dir"],
                 val_root_dir=self.exp_params["val_root_dir"],
@@ -3380,7 +3381,8 @@ class MM3DAdv_ATTACK:
                 num_workers=self.exp_params["num_workers"],
                 transform= transforms_list)
         
-
+        self.optim.object_detect = self.init_object_detection_return(
+            device=optim_device)
 
         self.optim.optim_device= optim_device
         self.optim.optim_data_type= optim_data_type
@@ -3437,12 +3439,12 @@ class MM3DAdv_ATTACK:
 
 
                 # resize
-                image_size=( self.exp_params["render_size"]["height"], 
+                image_size_render=( self.exp_params["render_size"]["height"], 
                             self.exp_params["render_size"]["width"])
                 # resize
                 adv_texture_resized = resize_tensor(adv_tensor_generate, 
-                                                   height=image_size[0], 
-                                                    width=image_size[1])
+                                                   height=image_size_render[0], 
+                                                    width=image_size_render[1])
                 # render 渲染
                 # 初始化object mesh
 
@@ -3451,7 +3453,7 @@ class MM3DAdv_ATTACK:
                 origin_com_tensor_rendered = load_parma_and_render_main(object_mesh=self.optim.mesh_model,
                                                                 backgroud=backgroud_images,
                                                                 path_camera_pose=cameras_pose_path,
-                                                                image_size=image_size,
+                                                                image_size=image_size_render,
                                                                 device=self.optim.optim_device,
                                                                 fov=110,
                                                                 blur_radius=0.0,
@@ -3466,7 +3468,7 @@ class MM3DAdv_ATTACK:
                 adv_com_tensor_rendered = load_parma_and_render_main(object_mesh=new_mesh_rendered_adv_com,
                                                                 backgroud=backgroud_images,
                                                                 path_camera_pose=cameras_pose_path,
-                                                                image_size=image_size,
+                                                                image_size=image_size_render,
                                                                 device=self.optim.optim_device,
                                                                 fov=110,
                                                                 blur_radius=0.0,
@@ -3477,42 +3479,52 @@ class MM3DAdv_ATTACK:
                 ## origin detection
 
                 ## adv com detection
-
-                detect_model_type =self.detect_params[" attack_model"]["model_type"]
+                detect_image_size=self.exp_params["image_size"]
+                adv_com_tensor_rendered_sized=resize_tensor(adv_com_tensor_rendered, 
+                                                   height=detect_image_size, 
+                                                    width=detect_image_size)
+                
+                detect_model_type =self.detect_params["attack_model"]["model_type"]
                 # 检测模型前向
-                result_object_adv_com, _ = self.optim.detect_model.detect_eval(
-                    adv_com_tensor_rendered,
+                result_object_adv_com, _ = self.optim.object_detect.detect_eval(
+                    adv_com_tensor_rendered_sized,
                     file_path="./visualization",
                     file_name='result_generate.jpg',
                     grad_status=True,
                     model_type=detect_model_type
                 )
 
-                result_object_origin, _ = self.optim.detect_model.detect_eval(
-                    origin_com_tensor_rendered,
+                origin_com_tensor_rendered_sized=resize_tensor(origin_com_tensor_rendered, 
+                                                   height=detect_image_size, 
+                                                    width=detect_image_size)
+                
+                result_object_origin, _ = self.optim.object_detect.detect_eval(
+                    origin_com_tensor_rendered_sized,
                     file_path="./visualization",
-                    file_name='result_generate.jpg',
+                    file_name='result_generate1.jpg',
                     grad_status=True,
                     model_type=detect_model_type
                 )
 
-
-
+                origin_com_tensor_rendered_sized=move_to_gpu_and_cast_dtype(origin_com_tensor_rendered_sized, self.optim.optim_device, self.optim.optim_data_type)
+                adv_com_tensor_rendered_sized=move_to_gpu_and_cast_dtype(adv_com_tensor_rendered_sized, self.optim.optim_device, self.optim.optim_data_type)
+                backgroud_images=move_to_gpu_and_cast_dtype(backgroud_images, self.optim.optim_device, self.optim.optim_data_type)
 
                 # 各损失计算
 
                 tv_loss = torch.tensor(0.0, device=self.optim.optim_device, dtype=self.optim.optim_data_type)
                 if self.exp_params["TV_loss_weight"] > 0:
-                    tv_loss = self.optim.TV_Loss(adv_com_tensor_rendered)
+                    tv_loss = self.optim.TV_Loss(adv_com_tensor_rendered_sized)
 
                 conext_loss = torch.tensor(0.0, device=self.optim.optim_device, dtype=self.optim.optim_data_type)
                 if self.exp_params["conext_loss_weight"] > 0:
-                    conext_loss = self.optim.conext_loss_l2(adv_com_tensor_rendered, origin_com_tensor_rendered, mask)
+                    mask=torch.ones_like(adv_com_tensor_rendered_sized)
+                    conext_loss = self.optim.conext_loss_l2(adv_com_tensor_rendered_sized, origin_com_tensor_rendered_sized, mask)
 
                 pr_loss = torch.tensor(0.0, device=self.optim.optim_device, dtype=self.optim.optim_data_type)
-                if  ["perceptual_loss_weight"] > 0 :
-                    pr_loss = self.optim.perceptual_loss(normalize_to_01(origin_com_tensor_rendered),
-                                                          normalize_to_01(adv_com_tensor_rendered))
+                if  self.exp_params["perceptual_loss_weight"] > 0 :
+                    pr_loss = self.optim.perceptual_loss(normalize_to_01(origin_com_tensor_rendered_sized),
+                                                          normalize_to_01(adv_com_tensor_rendered_sized))
 
                 # 检测损失,默认输出对抗损失，即需要最小化loss。
 

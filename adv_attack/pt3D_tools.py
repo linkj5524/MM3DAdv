@@ -35,7 +35,8 @@ def visualize_and_save_render(
     
     # 2. 张量转numpy并处理维度/数据类型
     # - 移到CPU → 转numpy → 调整维度(B,3,H,W)→(B,H,W,3) → 确保数值范围[0,1]
-    image_np = image_tensor.cpu().clamp(0.0, 1.0).numpy()  # 限制范围，避免异常值
+    image_tensor_temp = image_tensor.clone().detach()
+    image_np = image_tensor_temp.cpu().clamp(0.0, 1.0).numpy()  # 限制范围，避免异常值
     image_np = np.transpose(image_np, (0, 2, 3, 1))  # 维度转换：B×3×H×W → B×H×W×3
     
     # 3. 循环可视化并保存每张图像
@@ -434,7 +435,7 @@ def generate_camera_from_params(
         pitch = np.degrees(np.arctan2(pt3D_y, np.sqrt(pt3D_x**2 + pt3D_z**2)))
         # 3D torch ,pytoch3D 和carla 坐标系关系，需如下调整
         azim_angle = np.degrees(np.arctan2(pt3D_x, pt3D_z))  
-        azim_angle = -azim_angle  # 符号修正
+        azim_angle = azim_angle  # 符号修正
         
         # 生成单个相机的外参
         R_single, T_single = look_at_view_transform(
@@ -547,6 +548,7 @@ def render_process(
         torch.Tensor: 形状为 (B, 3, H, W) 的张量（B=相机数，C=3，H/W=图像尺寸）
                       数值范围 [0, 1]，float32类型
     """
+    
     # ================= 1 初始化批量渲染器 =================
     renderer = MeshRenderer(
         rasterizer=MeshRasterizer(
@@ -692,7 +694,8 @@ def apply_texture_to_mesh(
     
     # 3. 纹理格式转换：B×C×H×W → B×H×W×C（适配 PyTorch3D 纹理格式）
     texture = texture.permute(0, 2, 3, 1).contiguous()  # (B, H, W, 3)
-
+    texture = texture.to(device)
+    texture = texture.to(dtype=torch.float32) 
     # ========== 统一使用顶点颜色映射（兼容所有场景） ==========
     # 获取每个 mesh 的顶点数
     verts_padded = new_mesh.verts_padded()  # (B, V, 3)
