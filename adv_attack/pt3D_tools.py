@@ -780,7 +780,7 @@ def load_parma_and_render_main(object_mesh,
     visualize_and_save_render(image_tensor)
     visualize_and_save_render(rendered_image_tensor,save_dir="debug_results/1")
 
-    return image_tensor
+    return rendered_image_tensor
 
 
 def main_debug2():

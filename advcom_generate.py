@@ -20,6 +20,7 @@ from pytorch_lightning import seed_everything
 import time
 
 from annotator.util import resize_image, HWC3
+from annotator.canny import CannyDetector
 from cldm.model import create_model, load_state_dict
 from cldm.ddim_hacked import DDIMSampler
 import config
@@ -29,6 +30,57 @@ from cldm.ddim_hacked import DDIMSampler
 from adv_attack import *
 from adv_attack.attack_class import *
 from adv_attack.util import *
+
+
+def get_canny_edge_tensor(
+    input_image: np.ndarray,
+    image_resolution: int = 512,
+    num_samples: int = 1,
+    low_threshold: int = 50,
+    high_threshold: int = 150,
+    device: torch.device = None
+) -> torch.Tensor:
+    """
+    对输入图像执行 Canny 边缘检测，返回 B×C×H×W 格式的 float32 张量
+    参数：
+        input_image: 输入图像（np.ndarray），支持格式：
+                     - RGB/BGR: (H, W, 3)
+                     - 灰度图: (H, W)
+                     - RGBA: (H, W, 4)（自动丢弃 Alpha 通道）
+        image_resolution: 图像缩放分辨率（默认 512）
+        num_samples: 批量维度（B，默认 1）
+        low_threshold: Canny 低阈值（0~255，默认 50）
+        high_threshold: Canny 高阈值（0~255，默认 150）
+        device: 输出张量设备（默认自动检测 GPU/CPU）
+    返回：
+        torch.Tensor: 形状 (B, 3, H, W)，数值范围 0.0~1.0（0=背景，1=边缘），dtype=float32
+    """
+    apply_canny = CannyDetector()
+    # 1. 自动检测设备
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # 2. 图像预处理：强制转为 3 通道 + 缩放到指定分辨率
+    img = HWC3(input_image)  # 转为 (H, W, 3)（兼容灰度/RGBA）
+    img = resize_image(img, image_resolution)  # 缩放至目标分辨率
+    
+    # 3. 执行 Canny 边缘检测（核心）
+    detected_map = apply_canny(img, low_threshold, high_threshold)  # 输出 (H, W) 单通道灰度图
+    detected_map = HWC3(detected_map)  # 转为 (H, W, 3)（3 通道值相同）
+    
+    # 4. 转为张量 + 归一化（0~255 → 0.0~1.0）
+    control = torch.from_numpy(detected_map.copy()).float().to(device) / 255.0
+    
+    # 5. 增加批量维度（B）：复制 num_samples 份
+    control = torch.stack([control for _ in range(num_samples)], dim=0)
+    
+    # 6. 调整维度顺序：B×H×W×C → B×C×H×W（PyTorch 标准格式）
+    control = einops.rearrange(control, 'b h w c -> b c h w').contiguous()
+    
+    # 7. 确保类型为 float32（避免 bfloat16 等兼容问题）
+    control = control.to(dtype=torch.float32)
+    
+    return control
 
 
 import argparse  # 导入argparse库
@@ -86,12 +138,22 @@ if __name__ == '__main__':
                   detect_params=detect_params)
 
     imgsize_width=attack.exp_params["image_size"]
-    ref_path=r"./test_imgs/control_ref.jpg"
-    ref_tenture=cv2.imread(ref_path)
-    ref_tenture=cv2.resize(ref_tenture, (imgsize_width, imgsize_width))
-    ref_canny=cv2_to_tensor(ref_tenture)
-    if ref_canny.dim()==3:  # 添加维度
-        ref_canny = ref_canny.unsqueeze(0)
 
-    attack.generate_adversarial_com(ref_canny)
+    img = cv2.imread(r'./test_imgs/dog2.png')  # BGR 格式 (H, W, 3)
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # 转为 RGB
+    
+    # 2. 调用 Canny 函数
+    canny_tensor = get_canny_edge_tensor(
+        input_image=img,
+        image_resolution=512,
+        num_samples=1,
+        low_threshold=50,
+        high_threshold=150
+    )
+
+
+    if canny_tensor.dim()==3:  # 添加维度
+        canny_tensor = canny_tensor.unsqueeze(0)
+    
+    attack.generate_adversarial_com(canny_tensor)
 

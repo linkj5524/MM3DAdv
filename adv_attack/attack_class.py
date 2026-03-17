@@ -3584,6 +3584,8 @@ class MM3DAdv_ATTACK:
 
 
 
+        tensor2picture(controlnet_adv_texture[0],"./debug_results/controlnet_sample.jpg") 
+
 
         self.optim_prepare(ini_texture=controlnet_adv_texture)
         self.optim_step()

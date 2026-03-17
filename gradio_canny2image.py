@@ -3,7 +3,6 @@ import config
 
 import cv2
 import einops
-import gradio as gr
 import numpy as np
 import torch
 import random
@@ -71,8 +70,8 @@ if __name__=='__main__':
     else:
         print('no cuda')
     # 模型参数里面包含 ControlNet 和ControlledUnetModel 的参数
-    model = create_model('./models/cldm_v15.yaml').cpu()
-    temp=load_state_dict('./models/control_sd15_canny.pth', location='cuda')
+    model = create_model('./configs/controlnet_config/cldm_v15.yaml').cpu()
+    temp=load_state_dict('/root/autodl-fs/models_controlnet_adv/control_sd15_canny.pth', location='cuda')
     #nn.model 自带的参数加载函数
     model.load_state_dict(temp,strict=False)
     model = model.cuda()
@@ -96,7 +95,7 @@ if __name__=='__main__':
     eta = 0.0                     # DDIM采样器的eta参数
 
     # img=cv2.imread('test_imgs\human_line.png')
-    img=cv2.imread(r'exp\1213\000000363875\000000363875.jpg')
+    img=cv2.imread(r'./test_imgs/dog2.png')
     img=cv2.cvtColor(img, cv2.COLOR_BGR2RGB) 
     # 调用函数
     resu = process(
