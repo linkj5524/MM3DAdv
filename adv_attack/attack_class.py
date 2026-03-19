@@ -3410,7 +3410,7 @@ class MM3DAdv_ATTACK:
         self.optim.val_loader= val_loader
         mesh_model_t=load_obj_model(self.exp_params["mesh_model_path"], 
                                 optim_device)
-        self.optim.mesh_model = mesh_model_t.extend(self.exp_params["batch_size"])
+        self.optim.mesh_model =mesh_model_t
 
 
     def optim_step(self):
@@ -3451,7 +3451,7 @@ class MM3DAdv_ATTACK:
                 ## 直接render
 
                 origin_com_tensor_rendered = load_parma_and_render_main(object_mesh=self.optim.mesh_model,
-                                                                backgroud=backgroud_images,
+                                                                background=backgroud_images,
                                                                 path_camera_pose=cameras_pose_path,
                                                                 image_size=image_size_render,
                                                                 device=self.optim.optim_device,
@@ -3460,13 +3460,15 @@ class MM3DAdv_ATTACK:
                                                                 faces_per_pixel=1)
                 ## 纹理贴图渲染
 
-                new_mesh_rendered_adv_com=apply_texture_to_mesh(object_mesh=self.optim.mesh_model ,
-                                               texture=adv_texture_resized,
-                                               device=self.optim.optim_device)
 
+                new_mesh_rendered_adv_com=update_meshes_texture(
+                        original_meshes_list=self.optim.mesh_model,
+                        tex=adv_texture_resized,           # 形状为 [1, C, H, W] 的纹理张量
+                        target_index_list=[1,3],
+                        device=self.optim.optim_device)
 
                 adv_com_tensor_rendered = load_parma_and_render_main(object_mesh=new_mesh_rendered_adv_com,
-                                                                backgroud=backgroud_images,
+                                                                background=backgroud_images,
                                                                 path_camera_pose=cameras_pose_path,
                                                                 image_size=image_size_render,
                                                                 device=self.optim.optim_device,

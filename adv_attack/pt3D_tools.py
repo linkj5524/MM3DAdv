@@ -678,8 +678,7 @@ def load_parma_and_render_main(
     device,
     fov=110,
     blur_radius=0.0,
-    faces_per_pixel=1,
-    white_threshold=0.999
+    faces_per_pixel=1
 ):
     """
     支持多材质 mesh 渲染
