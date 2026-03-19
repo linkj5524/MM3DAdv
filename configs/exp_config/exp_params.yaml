@@ -49,4 +49,4 @@ val_root_dir : "/root/autodl-fs/data/data_test/carla_data/vehicle_tesla_model3/l
 batch_size: 1
 num_workers: 4
 
-mesh_model_path: "/root/autodl-fs/data/object_model/TeslaModel3_blue.obj"
+mesh_model_path: "/root/autodl-fs/data/object_model/byd_yangwang.obj"

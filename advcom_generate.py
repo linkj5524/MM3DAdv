@@ -82,6 +82,57 @@ def get_canny_edge_tensor(
     
     return control
 
+def get_canny_edge_tensor1(
+    input_image: np.ndarray,
+    resize_size: int = 128,        # 先缩放到 512/4=128
+    target_size: int = 512,        # 最终拼接为512×512
+    num_samples: int = 1,          # 批量数
+    low_threshold: int = 50,
+    high_threshold: int = 150,
+    device: Optional[torch.device] = None  # 对齐第一个函数的设备参数
+) -> torch.Tensor:
+    """
+    图像预处理：缩放→拼接重复→Canny边缘检测，返回与get_canny_edge_tensor格式一致的张量
+    核心：将128×128的图像拼接成512×512（4×4重复），非填充
+    返回：
+        torch.Tensor: 形状 (B, 3, 512, 512)，数值范围 0.0~1.0，dtype=float32
+    """
+    apply_canny = CannyDetector()
+    # 1. 自动检测设备（对齐第一个函数）
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # 2. 图像预处理：强制转为 3 通道（兼容灰度/RGBA）
+    img = HWC3(input_image)  # 转为 (H, W, 3)
+    
+    # 3. 强制缩放到 128×128（固定尺寸，便于后续拼接）
+    img_resized = cv2.resize(
+        img, 
+        (resize_size, resize_size),  # (W, H) → 128×128
+        interpolation=cv2.INTER_LANCZOS4  # 高质量缩放
+    )
+    
+    # 4. 拼接重复为512×512（4×4网格重复128×128的图像）
+    img_tiled = np.tile(img_resized, (4, 4, 1))  # (128*4, 128*4, 3) = (512,512,3)
+    
+    # 5. 执行 Canny 边缘检测（核心，对齐第一个函数逻辑）
+    detected_map = apply_canny(img_tiled, low_threshold, high_threshold)  # (512,512) 单通道
+    detected_map = HWC3(detected_map)  # 转为 (512,512,3)（3通道值相同）
+    
+    # 6. 转为张量 + 归一化（0~255 → 0.0~1.0）
+    control = torch.from_numpy(detected_map.copy()).float().to(device) / 255.0
+    
+    # 7. 增加批量维度（B）：复制 num_samples 份（对齐第一个函数）
+    control = torch.stack([control for _ in range(num_samples)], dim=0)
+    
+    # 8. 调整维度顺序：B×H×W×C → B×C×H×W（PyTorch 标准格式）
+    control = einops.rearrange(control, 'b h w c -> b c h w').contiguous()
+    
+    # 9. 确保类型为 float32（对齐第一个函数）
+    control = control.to(dtype=torch.float32)
+    
+    return control
+
 
 import argparse  # 导入argparse库
 
@@ -151,6 +202,14 @@ if __name__ == '__main__':
         high_threshold=150
     )
 
+    # canny_tensor = get_canny_edge_tensor1(
+    #     input_image=img,
+    #     resize_size=128,       # 512/4=128
+    #     target_size=512,       # 最终拼接为512×512
+    #     num_samples=1,
+    #     low_threshold=50,
+    #     high_threshold=150
+    # )
 
     if canny_tensor.dim()==3:  # 添加维度
         canny_tensor = canny_tensor.unsqueeze(0)

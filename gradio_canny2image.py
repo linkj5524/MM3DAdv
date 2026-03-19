@@ -18,7 +18,7 @@ apply_canny = CannyDetector()
 
 
 
-
+ 
 
 def process(input_image, prompt, a_prompt, n_prompt, num_samples, image_resolution, ddim_steps, guess_mode, strength, scale, seed, eta, low_threshold=50, high_threshold=150):
     with torch.no_grad():

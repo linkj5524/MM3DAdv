@@ -13,6 +13,8 @@ from pytorch3d.renderer import (
     TexturesVertex,
     PerspectiveCameras,
     TexturesUV,TexturesVertex, TexturesAtlas)
+from pytorch3d.structures import Meshes
+from pytorch3d.io import load_objs_as_meshes, load_obj
 import numpy as np
 from PIL import Image
 import os
@@ -114,50 +116,6 @@ def load_background_images(
 ############################################################
 ############################################################
 ############################################################
-
-
-def paste_non_white_regions(
-    rendered_images: torch.Tensor,  # 渲染图像张量 (B, 3, H, W)，范围[0,1]
-    background_images: torch.Tensor,  # 背景图像张量 (B, 3, H, W)，范围[0,1]
-    white_threshold: float = 0.99,  # 判定阈值：三通道均>该值则为白色
-    device: torch.device = torch.device("cpu")
-) -> torch.Tensor:
-    """
-    将渲染图像的非白色区域（RGB三通道不同时为1）粘贴到背景图像上
-    核心逻辑：
-        1. 判定条件：渲染图像中 RGB三个通道值均 > white_threshold → 白色区域
-        2. 非白色区域用渲染图像像素，白色区域保留背景图像像素
-    参数：
-        rendered_images: 渲染图像张量，形状(B, 3, H, W)，float32，范围[0,1]
-        background_images: 背景图像张量，形状(B, 3, H, W)，float32，范围[0,1]
-        white_threshold: 白色判定阈值（0-1），越接近1越严格（0.99≈纯黑/纯白渲染场景）
-        device: 计算设备（cpu/cuda）
-    返回：
-        torch.Tensor: 融合后的图像张量，形状(B, 3, H, W)，范围[0,1]，float32
-    """
-
-    # ================= 2 严格判定白色区域（三通道均>阈值） =================
-    # 步骤1：判断每个通道是否大于阈值 → (B, 3, H, W) 的布尔张量
-    is_channel_white = rendered_images > white_threshold
-    # 步骤2：三通道同时满足（均>阈值）→ 白色区域，结果为 (B, 1, H, W)
-    is_white_region = torch.all(is_channel_white, dim=1, keepdim=True)
-    # 步骤3：转换为float掩码 → 白色区域=1，非白色区域=0
-    white_mask = is_white_region.float()
-    # 非白色区域掩码 → 非白色=1，白色=0（用于粘贴渲染图）
-    non_white_mask = 1.0 - white_mask
-
-    # ================= 3 图像融合（粘贴非白色区域） =================
-    # 非白色区域：渲染图像素 × 非白色掩码
-    # 白色区域：背景图像素 × 白色掩码
-    fused_images = (
-        rendered_images * non_white_mask + 
-        background_images * white_mask
-    )
-    
-    # ================= 4 限制数值范围（避免浮点溢出） =================
-    fused_images = torch.clamp(fused_images, 0.0, 1.0)
-    
-    return fused_images.to(device)
 
 
 
@@ -285,121 +243,114 @@ def load_camera_intrinsics(path):
     data.close()  # 关闭文件句柄
     return K
 
-    
 
 
-def load_obj_model(obj_path: str, device: torch.device) :
+def load_obj_model(obj_path: str, device: torch.device):
     """
-    从指定路径加载OBJ模型，返回PyTorch3D的Meshes对象（与原有sphere模型格式一致）
-    
-    参数:
-        obj_path: OBJ文件的绝对/相对路径
-        device: 模型加载的设备 (cpu/cuda)
-    
-    返回:
-        Meshes对象: 包含顶点、面、默认纹理的3D模型
+    加载 OBJ 并按材质渲染：
+    - 有贴图 → 使用 UV 纹理
+    - 无贴图 → 使用材料颜色创建纯色UV纹理（修复维度匹配问题）
     """
-    # 1. 加载OBJ文件（自动处理mtl/纹理，若无纹理则后续初始化）
-    try:
-        # load_objs_as_meshes会自动解析OBJ+MTL，返回Meshes对象
-        mesh = load_objs_as_meshes(
-            [obj_path],          # 传入路径列表（单文件）
-            device=device,
-            load_textures=True,  # 尝试加载纹理（无纹理时返回None）
-            create_texture_atlas=True  # 兼容不同纹理格式
+    print(f"Loading OBJ: {obj_path}")
+
+    verts, faces, aux = load_obj(obj_path, load_textures=True)
+    verts = verts.to(device)
+    faces_idx = faces.verts_idx.to(device)
+
+    has_uv = aux.verts_uvs is not None and faces.textures_idx is not None and len(aux.verts_uvs) > 0
+    print("OBJ检测:")
+    print("verts_uvs:", None if aux.verts_uvs is None else aux.verts_uvs.shape)
+    print("faces_uvs:", None if faces.textures_idx is None else faces.textures_idx.shape)
+    print("texture_images:", aux.texture_images)
+    print("materials:", list(aux.material_colors.keys()) if aux.material_colors else None)
+
+    # faces.materials_idx 对应的整数索引，需要映射到 aux.material_colors
+    material_names = list(aux.material_colors.keys()) if aux.material_colors else []
+
+    meshes_list = []
+
+    for mat_idx in faces.materials_idx.unique().tolist():
+        # 对应材质名字
+        mat_name = material_names[mat_idx] if mat_idx < len(material_names) else None
+
+        # 找到使用这个材质的面
+        face_mask = (faces.materials_idx == mat_idx)
+        face_indices = face_mask.nonzero(as_tuple=True)[0]
+        
+        # 提取当前材质对应的面和UV索引（核心修复：仅保留当前材质的索引）
+        current_faces_idx = faces_idx[face_indices]  # 当前材质的面索引
+        current_faces_uvs = faces.textures_idx[face_indices].to(device) if has_uv else None
+        current_verts_uvs = aux.verts_uvs.to(device) if has_uv else None
+
+        # 是否有纹理图片
+        if has_uv and aux.texture_images is not None and mat_name in aux.texture_images:
+            # 有纹理图：使用当前材质的UV索引
+            tex_img = aux.texture_images[mat_name].to(device).permute(2, 0, 1).unsqueeze(0).float() / 255.0
+            texture_image = tex_img.permute(0, 2, 3, 1).contiguous()
+            tex = TexturesUV(
+                maps=texture_image,
+                faces_uvs=current_faces_uvs[None],  # 仅当前材质的面UV索引
+                verts_uvs=current_verts_uvs[None]    # 全局UV（但索引仅指向当前材质的面）
+            )
+        # 无纹理图片但有UV → 创建纯色UV纹理
+        elif has_uv:
+            # 获取材质漫反射颜色
+            try:
+                diffuse_color = aux.material_colors[mat_name]["diffuse_color"]
+                if isinstance(diffuse_color, torch.Tensor):
+                    color = diffuse_color.to(device=device, dtype=torch.float32).detach()
+                else:
+                    # 处理颜色是列表/数组的情况，确保维度为3
+                    color = torch.tensor(diffuse_color, device=device, dtype=torch.float32)
+                    if color.ndim == 2:  # 修复颜色维度异常（如[[r,g,b],[r,g,b]]）
+                        color = color[0]
+            except (KeyError, TypeError, IndexError):
+                color = torch.tensor([0.7, 0.7, 0.7], device=device)  # 默认灰色
+        
+            # 确保颜色是1维张量（RGB）
+            color = color.squeeze()
+            if color.numel() != 3:
+                color = torch.tensor([0.7, 0.7, 0.7], device=device)
+        
+            # 创建纯色UV纹理图（512x512，适配UV映射）
+            texture_image = color.expand(1, 512, 512, 3).contiguous()
+            
+            # 用纯色纹理创建UV纹理（使用当前材质的UV索引）
+            tex = TexturesUV(
+                maps=texture_image,
+                faces_uvs=current_faces_uvs[None],  # 核心：仅当前材质的面UV索引
+                verts_uvs=current_verts_uvs[None]
+            )
+        # 无UV也无纹理 → 降级使用顶点颜色
+        else:
+            try:
+                diffuse_color = aux.material_colors[mat_name]["diffuse_color"]
+                if isinstance(diffuse_color, torch.Tensor):
+                    color = diffuse_color.to(device=device, dtype=torch.float32).detach()
+                else:
+                    color = torch.tensor(diffuse_color, device=device, dtype=torch.float32)
+                    if color.ndim == 2:
+                        color = color[0]
+            except (KeyError, TypeError, IndexError):
+                color = torch.tensor([0.7, 0.7, 0.7], device=device)
+
+            color = color.squeeze()
+            if color.numel() != 3:
+                color = torch.tensor([0.7, 0.7, 0.7], device=device)
+
+            verts_color = color.expand(len(verts), 3)
+            tex = TexturesVertex(verts_features=verts_color[None])
+        
+        # 创建当前材质的Mesh（使用当前材质的面索引）
+        mesh = Meshes(
+            verts=[verts],  # 全局顶点（OBJ的所有顶点）
+            faces=[current_faces_idx],  # 仅当前材质的面
+            textures=tex
         )
-    except FileNotFoundError:
-        raise FileNotFoundError(f"OBJ文件未找到，请检查路径: {obj_path}")
-    except Exception as e:
-        raise RuntimeError(f"加载OBJ失败: {str(e)}")
+        meshes_list.append(mesh)
 
-    # 2. 确保模型有默认顶点颜色（兼容原有代码逻辑）
-    if mesh.textures is None:
-        # 若无纹理，初始化和原有sphere一致的蓝色系顶点颜色
-        verts = mesh.verts_packed()
-        default_color = torch.ones_like(verts)[None] * torch.tensor([0.2, 0.7, 1.0], device=device)
-        mesh.textures = TexturesVertex(verts_features=default_color)
-
-    # 3. 返回标准化的Meshes对象
-    return mesh
-
-
-
-# def generate_camera_from_params(
-#     pose_path: str, 
-#     intrinsics_path: str, 
-#     device: torch.device,
-#     img_size: tuple = (640, 480)  # (width, height)
-# ) -> PerspectiveCameras:
-#     """
-#     根据相机内参、外参文件路径生成PyTorch3D的PerspectiveCameras对象
-#     参数:
-#         pose_path: 相机外参（位姿）文件路径（npz格式）
-#         intrinsics_path: 相机内参文件路径（npz格式）
-#         device: 运行设备 (cpu/cuda)
-#         img_size: 图像尺寸 (width, height)，用于计算fov
-#     返回:
-#         PerspectiveCameras: 配置好的相机对象
-#     """
-#     # 1. 加载内外参
-#     pose = load_camera_pose(pose_path)
-#     K_np = load_camera_intrinsics(intrinsics_path)
-    
-#     # 2. 解析外参：转换旋转（欧拉角→旋转矩阵）、提取平移向量
-#     # 欧拉角（pitch,yaw,roll，单位度）转旋转矩阵（PyTorch3D默认右手系）
-#     pitch, yaw, roll = np.radians(pose["rotation"])
-    
-#     # 计算旋转矩阵（Z-Y-X顺序，适配Carla/常规相机坐标系）
-#     cos_p, sin_p = np.cos(pitch), np.sin(pitch)
-#     cos_y, sin_y = np.cos(yaw), np.sin(yaw)
-#     cos_r, sin_r = np.cos(roll), np.sin(roll)
-    
-#     # 旋转矩阵 R (3x3)
-#     R_x = np.array([[1, 0, 0], [0, cos_p, -sin_p], [0, sin_p, cos_p]])
-#     R_y = np.array([[cos_y, 0, sin_y], [0, 1, 0], [-sin_y, 0, cos_y]])
-#     R_z = np.array([[cos_r, -sin_r, 0], [sin_r, cos_r, 0], [0, 0, 1]])
-#     R = R_z @ R_y @ R_x  # 组合旋转矩阵
-#     R = np.transpose(R)  # 适配PyTorch3D的坐标系方向
-#     R = torch.tensor(R, dtype=torch.float32, device=device).unsqueeze(0)  # (1, 3, 3)
-    
-#     # 平移向量 T (相机位置，PyTorch3D中T是相机在世界坐标系的位置，符号需调整)
-#     T = torch.tensor(pose["location"], dtype=torch.float32, device=device).unsqueeze(0)  # (1, 3)
-    
-#     # 3. 解析内参：适配PerspectiveCameras的参数格式
-#     fx = K_np[0, 0]
-#     fy = K_np[1, 1]
-#     cx = K_np[0, 2]
-#     cy = K_np[1, 2]
-#     width, height = img_size
-    
-#     # 4. 构造PerspectiveCameras所需的参数
-#     # focal_length: (N, 2) 格式，对应fx, fy
-#     focal_length = torch.tensor([[fx, fy]], dtype=torch.float32, device=device)
-    
-#     # principal_point: (N, 2) 格式，对应cx, cy（主点坐标）
-#     principal_point = torch.tensor([[cx, cy]], dtype=torch.float32, device=device)
-    
-#     # 可选：构造完整的K矩阵（4x4），如果提供则无需指定focal_length和principal_point
-#     K = torch.eye(4, device=device, dtype=torch.float32).unsqueeze(0)
-#     K[0, :3, :3] = torch.tensor(K_np, dtype=torch.float32, device=device)
-    
-#     # 图像尺寸：(N, 2) 格式，(height, width)
-#     image_size = torch.tensor([[height, width]], dtype=torch.int32, device=device)
-    
-#     # 5. 创建PerspectiveCameras对象（两种方式选其一）
-#     # 方式1：使用focal_length和principal_point（推荐）
-#     cameras = PerspectiveCameras(
-#         focal_length=focal_length,
-#         principal_point=principal_point,
-#         R=R,
-#         T=T,
-#         device=device,
-#         in_ndc=False,  # 屏幕空间坐标，设置为False
-#         image_size=image_size
-#     )
-    
-    
-#     return cameras
+    print(f"共生成 {len(meshes_list)} 个子 Mesh (材质分割)")
+    return meshes_list
 
 def generate_camera_from_params(
     pose_paths: list,  
@@ -505,16 +456,35 @@ def model_generate_fixed(device):
     return mesh
 
 
-def light_set_fixed(device):
-        # --------------------------------
-    # 3 光照
+
+
+def light_set_fixed(
+    device,
+    ambient_color=((1, 1, 1),),    # 官方默认环境光颜色
+    diffuse_color=((0.3, 0.3, 0.3),),    # 官方默认漫反射光颜色
+    specular_color=((0.2, 0.2, 0.2),),   # 官方默认镜面反射光颜色
+    location=((2, 4, 2),)                # 官方默认光源位置（可覆盖为你的原位置）
+):
+    """
+    配置固定点光源
+    :param device: 设备 (str/torch.device)，如 "cuda" / "cpu"
+    :param ambient_color: 环境光RGB颜色，格式 ((r,g,b),) 或 [[r,g,b]]
+    :param diffuse_color: 漫反射光RGB颜色，格式 ((r,g,b),) 或 [[r,g,b]]
+    :param specular_color: 镜面反射光RGB颜色，格式 ((r,g,b),) 或 [[r,g,b]]
+    :param location: 光源xyz位置，格式 ((x,y,z),) 或 [[x,y,z]]
+    :return: 配置好的PointLights对象
+    """
+    # --------------------------------
+    # 3 光照（使用官方默认参数，可通过传参覆盖）
     # --------------------------------
     lights = PointLights(
         device=device,
-        location=[[2.0, 2.0, -2.0]]
+        ambient_color=ambient_color,
+        diffuse_color=diffuse_color,
+        specular_color=specular_color,
+        location=location
     )
     return lights
-
 
 def rasterizer_set():
     # --------------------------------
@@ -523,227 +493,199 @@ def rasterizer_set():
     raster_settings = RasterizationSettings(
         image_size=512,
         blur_radius=0.0,
-        faces_per_pixel=1
+        faces_per_pixel=1,
+        bin_size=0
     )
     return raster_settings
 
+def update_meshes_texture(
+    original_meshes_list,
+    tex,  # [1, C, H, W]
+    target_index_list,
+    device
+):
+    """
+    用给定 texture 替换指定子 Mesh 的纹理
+
+    Args:
+        original_meshes_list: List[Meshes]
+        tex: [1, C, H, W]
+        target_index_list: 需要替换纹理的 mesh index
+        device: torch.device
+
+    Returns:
+        new_meshes_list: List[Meshes]
+    """
+
+    new_meshes_list = []
+
+    # ================= preprocess texture =================
+    tex = tex.to(device).float()
+
+    # [1, C, H, W] -> [1, H, W, C]
+    tex = tex.permute(0, 2, 3, 1).contiguous()
+
+    # ================= loop meshes =================
+    for i, mesh in enumerate(original_meshes_list):
+
+        # --------- 不在 target -> 直接 copy ----------
+        if i not in target_index_list:
+            new_meshes_list.append(mesh)
+            continue
+
+        # =====================================================
+        # 目标 mesh：替换 texture
+        # =====================================================
+
+        verts = mesh.verts_list()[0]
+        faces = mesh.faces_list()[0]
+
+        # ================= 情况1：UV texture =================
+        if isinstance(mesh.textures, TexturesUV):
+
+            # UV 信息必须保留
+            faces_uvs = mesh.textures.faces_uvs_padded()
+            verts_uvs = mesh.textures.verts_uvs_padded()
+
+            new_tex = TexturesUV(
+                maps=tex,
+                faces_uvs=faces_uvs,
+                verts_uvs=verts_uvs
+            )
+
+        # ================= 情况2：Vertex color fallback =================
+        elif isinstance(mesh.textures, TexturesVertex):
+
+            # 用 texture 平均值替代 vertex color
+            avg_color = tex.mean(dim=(1, 2), keepdim=True)  # [1,1,1,C]
+            avg_color = avg_color.squeeze(1).squeeze(1)     # [1,C]
+
+            verts_features = avg_color.expand(len(verts), -1)
+
+            new_tex = TexturesVertex(
+                verts_features=verts_features.unsqueeze(0)
+            )
+
+        # ================= fallback（无纹理） =================
+        else:
+            # 强制创建 UV texture（最安全）
+            faces_uvs = mesh.textures.faces_uvs_padded()
+            verts_uvs = mesh.textures.verts_uvs_padded()
+
+            new_tex = TexturesUV(
+                maps=tex,
+                faces_uvs=faces_uvs,
+                verts_uvs=verts_uvs
+            )
+
+        # ================= rebuild mesh =================
+        new_mesh = mesh.__class__(
+            verts=[verts.to(device)],
+            faces=[faces.to(device)],
+            textures=new_tex
+        )
+
+        new_meshes_list.append(new_mesh)
+
+    return new_meshes_list
 
 
 def render_process(
-    cameras,  # 批量相机对象（FoVPerspectiveCameras），而非list
+    cameras,
     raster_settings,
     lights,
-    mesh,
+    meshes_list,   # ✅ List[Meshes]
     device: torch.device
 ) -> torch.Tensor:
     """
-    为批量相机渲染图像，返回B×C×H×W的张量
-    参数：
-        cameras: PyTorch3D的批量相机对象（FoVPerspectiveCameras/PerspectiveCameras）
-        raster_settings: RasterizationSettings对象（光栅化配置）
-        lights: 光源对象（如PointLights）
-        mesh: 待渲染的Meshes对象（3D模型）
-        device: 运行设备 (cpu/cuda)
-    返回：
-        torch.Tensor: 形状为 (B, 3, H, W) 的张量（B=相机数，C=3，H/W=图像尺寸）
-                      数值范围 [0, 1]，float32类型
+    多材质 Mesh 渲染（正确遮挡合成）
+    返回: (B, 3, H, W)
     """
-    
-    # ================= 1 初始化批量渲染器 =================
+
+    B = cameras.R.shape[0]
+    H ,W= raster_settings.image_size
+
+    # ================= renderer =================
     renderer = MeshRenderer(
         rasterizer=MeshRasterizer(
-            cameras=cameras,          # 批量相机对象（自动适配多相机）
+            cameras=cameras,
             raster_settings=raster_settings
         ),
         shader=SoftPhongShader(
             device=device,
-            cameras=cameras,          # 批量相机
-            lights=lights             # 光源（若需批量光源，可传入形状为(B,3)的lights）
+            cameras=cameras,
+            lights=lights
         )
     )
 
-    # ================= 2 批量渲染 =================
-    # 渲染结果：形状为 (B, H, W, 4) → 4通道（RGB+Alpha）
-    # mesh会自动广播到和cameras相同的batch维度
-    images = renderer(mesh)
+    # ================= 初始化输出 =================
+    final_rgb = torch.zeros((B, H, W, 3), device=device)
+    final_depth = torch.full((B, H, W), float("inf"), device=device)
 
-    # ================= 3 格式转换 =================
-    # 1. 提取RGB通道（丢弃Alpha）：(B, H, W, 3)
-    rgb_images = images[..., :3]
-    # 2. 调整维度顺序：(B, H, W, 3) → (B, 3, H, W)（符合PyTorch张量规范）
-    rgb_images = rgb_images.permute(0, 3, 1, 2)
-    # 3. 确保数值范围在[0,1]（避免渲染溢出）
-    rgb_images = torch.clamp(rgb_images, 0.0, 1.0)
+    # ================= 逐 mesh 渲染 =================
+    for mesh in meshes_list:
+        mesh = mesh.extend(B)  
+        fragments = renderer.rasterizer(mesh)
 
-    return rgb_images
+        # depth: (B, H, W, K)
+        depth = fragments.zbuf[..., 0]
 
+        # mask
+        mask = depth > 0
 
-# def apply_texture_to_mesh(
-#     object_mesh,
-#     texture,  # 纹理张量 (B, C, H, W) 或 None，C=3，范围[0,1]
-#     device):
-#     """
-#     将纹理张量（B×C×H×W）映射到 3D 网格（Meshes），返回带纹理的新 Meshes 对象
-#     兼容所有 PyTorch3D 纹理类型：TexturesUV/TexturesAtlas/TexturesVertex
-#     核心逻辑：
-#         1. TexturesAtlas/TexturesUV → 复用原有 UV 坐标，绑定新纹理
-#         2. TexturesVertex/无纹理 → 降级为顶点颜色映射
-#         3. 支持批量纹理（B 需与 mesh 批量大小匹配）
-#     参数：
-#         object_mesh: 原始 3D 网格（Meshes 对象）
-#         texture: 纹理张量，形状 (B, 3, H, W)，float32，范围 [0,1]；传 None 则返回原 mesh
-#         device: 计算设备（cpu/cuda）
-#     返回：
-#         Meshes: 带纹理的新网格对象（不修改原始 mesh）
-#     """
-#     # 1. 边界条件：无纹理时返回原 mesh 副本
-#     if texture is None:
-#         return object_mesh.clone()
-    
+        # shader 颜色
+        images = renderer.shader(fragments, mesh)
+        rgb = images[..., :3]
 
-#     # 4. 复制原始 mesh，避免修改原对象
-#     new_mesh = object_mesh.clone().to(device)
-    
-#     # 5. 纹理格式转换：B×C×H×W → B×H×W×C（适配 PyTorch3D 纹理格式）
-#     texture = texture.permute(0, 2, 3, 1).contiguous()  # (B, H, W, 3)
-    
+        # ================= z-buffer 合成 =================
+        update_mask = (depth < final_depth) & mask
 
-#     # ========== 兼容 TexturesAtlas/TexturesUV 纹理（复用 UV 坐标） ==========
-#     has_uv = False
-#     verts_uvs = None
-#     faces_uvs = None
-    
-#     # 处理 TexturesAtlas 类型（你的场景）
-#     if isinstance(new_mesh.textures, TexturesAtlas):
+        final_depth[update_mask] = depth[update_mask]
+        final_rgb[update_mask] = rgb[update_mask]
 
-#         # TexturesAtlas 的 UV 坐标存储在 atlas_uvs_padded()
-#         verts_uvs = new_mesh.textures.atlas_uvs_padded()  # (B, V, 2)
-#         # TexturesAtlas 无 faces_uvs，复用原 faces 索引
-#         faces_uvs = new_mesh.faces_padded()  # (B, F, 3)
-#         has_uv = True
-    
-#     # 处理 TexturesUV 类型
-#     elif isinstance(new_mesh.textures, TexturesUV):
+    # ================= 格式转换 =================
+    final_rgb = final_rgb.permute(0, 3, 1, 2)
+    final_rgb = torch.clamp(final_rgb, 0.0, 1.0)
 
-#         verts_uvs = new_mesh.textures.verts_uvs_padded()  # (B, V, 2)
-#         faces_uvs = new_mesh.textures.faces_uvs_padded()  # (B, F, 3)
-#         has_uv = True
-    
-#     # 有 UV 坐标时，绑定新的 UV 纹理
-#     if has_uv and verts_uvs is not None and faces_uvs is not None:
-#         # 创建 UV 纹理对象（统一用 TexturesUV，兼容所有 UV 坐标）
-#         texture_uv = TexturesUV(
-#             maps=texture.to(device),       # (B, H, W, 3) 纹理图像
-#             verts_uvs=verts_uvs.to(device),# 顶点 UV 坐标
-#             faces_uvs=faces_uvs.to(device) # 面 UV 索引
-#         )
-#         new_mesh.textures = texture_uv
+    return final_rgb,final_depth
 
-    
-#     # ========== 降级：顶点颜色映射（无 UV 坐标/TexturesVertex 时） ==========
-#     else:
-
-#         # 获取每个 mesh 的顶点数
-#         verts_padded = new_mesh.verts_padded()  # (B, V, 3)
-#         B, V, _ = verts_padded.shape
-        
-#         # 将纹理图像平均采样到顶点（适配批量）
-#         vertex_colors = []
-#         for b in range(B):
-#             # 单批次纹理：(H, W, 3) → 展平为 (H*W, 3)
-#             tex_flat = texture[b].reshape(-1, 3)
-#             # 均匀采样到顶点（避免随机采样的不确定性）
-#             sample_step = max(1, tex_flat.shape[0] // V)
-#             sample_idx = torch.arange(0, tex_flat.shape[0], sample_step)[:V].to(device)
-#             vert_color = tex_flat[sample_idx]  # (V, 3)
-#             # 补充不足的顶点（若纹理像素数 < 顶点数）
-#             if len(vert_color) < V:
-#                 pad_num = V - len(vert_color)
-#                 vert_color = torch.cat([vert_color, vert_color[:pad_num]], dim=0)
-#             vertex_colors.append(vert_color)
-        
-#         # 拼接为批量顶点颜色：(B, V, 3)
-#         vertex_colors = torch.stack(vertex_colors, dim=0)
-#         # 创建顶点颜色纹理
-#         texture_vertex = TexturesVertex(verts_colors=vertex_colors.to(device))
-#         new_mesh.textures = texture_vertex
-
-    
-#     return new_mesh
-
-def apply_texture_to_mesh(
-    object_mesh,
-    texture,  # 纹理张量 (B, C, H, W) 或 None，C=3，范围[0,1]
-    device):
+def compose_with_background(
+    rgb,          # (B,3,H,W)
+    depth,        # (B,H,W)
+    background    # (B,3,H,W)
+):
     """
-    将纹理张量（B×C×H×W）映射到 3D 网格（Meshes），返回带纹理的新 Meshes 对象
-    核心逻辑：统一使用顶点颜色映射（兼容所有 PyTorch3D 版本和纹理类型）
-    参数：
-        object_mesh: 原始 3D 网格（Meshes 对象）
-        texture: 纹理张量，形状 (B, 3, H, W)，float32，范围 [0,1]；传 None 则返回原 mesh
-        device: 计算设备（cpu/cuda）
-    返回：
-        Meshes: 带纹理的新网格对象（不修改原始 mesh）
+    使用 depth 做前景mask融合
     """
-    # 1. 边界条件：无纹理时返回原 mesh 副本
-    if texture is None:
-        return object_mesh.clone()
 
-    # 2. 复制原始 mesh，避免修改原对象
-    new_mesh = object_mesh.clone().to(device)
-    
-    # 3. 纹理格式转换：B×C×H×W → B×H×W×C（适配 PyTorch3D 纹理格式）
-    texture = texture.permute(0, 2, 3, 1).contiguous()  # (B, H, W, 3)
-    texture = texture.to(device)
-    texture = texture.to(dtype=torch.float32) 
-    # ========== 统一使用顶点颜色映射（兼容所有场景） ==========
-    # 获取每个 mesh 的顶点数
-    verts_padded = new_mesh.verts_padded()  # (B, V, 3)
-    B, V, _ = verts_padded.shape
-    
-    # 将纹理图像平均采样到顶点（适配批量）
-    vertex_colors = []
-    for b in range(B):
-        # 单批次纹理：(H, W, 3) → 展平为 (H*W, 3)
-        tex_flat = texture[b].reshape(-1, 3)
-        # 均匀采样到顶点（避免随机采样的不确定性）
-        sample_step = max(1, tex_flat.shape[0] // V)
-        sample_idx = torch.arange(0, tex_flat.shape[0], sample_step)[:V].to(device)
-        vert_color = tex_flat[sample_idx]  # (V, 3)
-        # 补充不足的顶点（若纹理像素数 < 顶点数）
-        if len(vert_color) < V:
-            pad_num = V - len(vert_color)
-            vert_color = torch.cat([vert_color, vert_color[:pad_num]], dim=0)
-        vertex_colors.append(vert_color)
-    
-    # 拼接为批量顶点颜色：(B, V, 3) → 符合官方文档的 (N, V, C) 格式
-    vertex_colors = torch.stack(vertex_colors, dim=0).to(device)
-    # 创建顶点颜色纹理（关键修改：使用 verts_features 替代 verts_colors）
-    texture_vertex = TexturesVertex(verts_features=vertex_colors)
-    new_mesh.textures = texture_vertex
+    # ================= 前景mask =================
+    # 有效像素：深度不是inf
+    mask = torch.isfinite(depth)   # (B,H,W)
 
-    return new_mesh
+    # 扩展到3通道
+    mask = mask.unsqueeze(1)       # (B,1,H,W)
 
-def load_parma_and_render_main(object_mesh,
-                               backgroud,
-                               path_camera_pose,
-                               image_size,
-                               device,
-                               fov=110,
-                               blur_radius=0.0,
-                               faces_per_pixel=1,
-                               white_threshold=0.999):
-    '''
-    object_mesh: 3D模型
-    backgroud: 背景图,多batch,数据范围0-1
-    path_camera_pose: 相机位姿文件路径 的列表
-    image_size: 图像尺寸
-    device: 运行设备
-    fov: 视场角
-    blur_radius: 光栅化模糊半径
-    faces_per_pixel: 光栅化每像素面数
-    '''
+    # ================= 融合 =================
+    output = torch.where(mask, rgb, background)
 
+    return output
+
+def load_parma_and_render_main(
+    object_mesh,   # ✅ List[Meshes]
+    background,
+    path_camera_pose,
+    image_size,
+    device,
+    fov=110,
+    blur_radius=0.0,
+    faces_per_pixel=1,
+    white_threshold=0.999
+):
+    """
+    支持多材质 mesh 渲染
+    """
+
+    # ================= 相机 =================
     cameras = generate_camera_from_params(
         pose_paths=path_camera_pose,
         device=device,
@@ -751,36 +693,35 @@ def load_parma_and_render_main(object_mesh,
         img_size=image_size
     )
 
-
-    # -------------------------- 4. 初始化渲染组件 --------------------------
-    # 固定光照（复用原有函数）
+    # ================= 光照 =================
     light = light_set_fixed(device)
 
-    # 光栅化设置（适配图像尺寸）
+    # ================= raster =================
     raster_settings = RasterizationSettings(
-        image_size=image_size,  # 高度
+        image_size=image_size,
         blur_radius=blur_radius,
-        faces_per_pixel=faces_per_pixel
+        faces_per_pixel=faces_per_pixel,
+        bin_size=0
     )
 
-
-    image_tensor = render_process(
+    # ================= 渲染 =================
+    image_tensor,images_depth = render_process(
         cameras=cameras,
         raster_settings=raster_settings,
         lights=light,
-        mesh=object_mesh,
+        meshes_list=object_mesh,  # 
         device=device
     )
 
-    # 后处理
-    rendered_image_tensor = paste_non_white_regions(image_tensor, backgroud,
-                                            white_threshold=white_threshold)
+    rendered_image_tensor=compose_with_background(image_tensor,images_depth,background)
 
-    # --------------------------  结果可视化与保存(debug) --------------------------
+    # ================= debug =================
     visualize_and_save_render(image_tensor)
-    visualize_and_save_render(rendered_image_tensor,save_dir="debug_results/1")
+    visualize_and_save_render(rendered_image_tensor, save_dir="debug_results/1")
 
     return rendered_image_tensor
+
+
 
 
 def main_debug2():
@@ -788,15 +729,17 @@ def main_debug2():
     # -------------------------- 1. 配置路径与参数 --------------------------
     # 数据路径（按你的需求指定）
     root="/root/autodl-fs/data/data_test/carla_data/vehicle_tesla_model3/location_000/"
-    name="fixed_000"
+    name="fixed_002"
     RGB_PATH = os.path.join(root, "rgb", name+".png")       # RGB图路径
     DEPTH_PATH = os.path.join(root, "depth", name+".png")   # 深度图路径
     MASK_PATH = os.path.join(root, "mask", name+".png")     # 掩码图路径
     POSE_PATH = os.path.join(root, "camera_pose", name+".npz")   # 位姿文件路径
     INTRINSICS_PATH = os.path.join(root, "camera_intrinsics", name+".npz")  # 内参文件路径
     SAVE_DIR = "./debug_results/exp2"  # 结果保存目录
-    OBJECT_OBJ_PATH = '/root/autodl-fs/data/object_model/TeslaModel3_blue.obj'  # OBJ模型路径
-
+    OBJECT_OBJ_PATH = '/root/autodl-fs/data/object_model/old.obj'  # OBJ模型路径
+    OBJECT_OBJ_PATH = '/root/autodl-fs/data/object_model/byd_yangwang.obj'  # OBJ模型路径
+    # 
+    # OBJECT_OBJ_PATH = '/root/autodl-fs/data/object_model/TeslaModel3_blue.obj'
     # 图像尺寸（从RGB图自动获取，也可手动指定）
     IMG_SIZE = ( 720,1280)  # ( height,width)，若需自动获取可参考下方注释代码
 
@@ -813,21 +756,41 @@ def main_debug2():
 
     mesh_model = load_obj_model(OBJECT_OBJ_PATH, device)
 
-    camera_paths_list=[POSE_PATH,POSE_PATH.replace("fixed_000","fixed_001")] 
-    backgroud_paths_list=[RGB_PATH,RGB_PATH.replace("fixed_000","fixed_001")]
+    camera_paths_list=[POSE_PATH,POSE_PATH.replace("fixed_002","fixed_001")] 
+    backgroud_paths_list=[RGB_PATH,RGB_PATH.replace("fixed_002","fixed_001")]
 
     backgroud_images=load_background_images(backgroud_paths_list,device=device)
     # 生成对应大小的render texture
     # 随机
-    tex=torch.rand_like(backgroud_images).to(device)
+    # 读取图像
+    tex_images=cv2.imread("./debug_results/controlnet_sample.jpg")
+    tex_images=cv2.resize(tex_images,(IMG_SIZE[1],IMG_SIZE[0]))
+    tex_images=torch.from_numpy(tex_images).permute(2,0,1).float().to(device)
+    # 归一化
+    tex=tex_images/255.0
+    tex=tex.unsqueeze(0)
+
     # tex=torch.ones_like(backgroud_images).to(device)
 
-    new_mesh = mesh_model.extend(len(camera_paths_list))
+    # new_mesh = mesh_model.extend(len(camera_paths_list))
 
-    new_mesh1=apply_texture_to_mesh(new_mesh,tex,device)
+    images_rnedered = load_parma_and_render_main(object_mesh=mesh_model,
+                                                 background=backgroud_images,
+                                                 path_camera_pose=camera_paths_list,
+                                                 image_size=IMG_SIZE,
+                                                 device=device,
+                                                 fov=110,
+                                                 blur_radius=0.0,
+                                                 faces_per_pixel=1)
+    
+    new_mesh1=update_meshes_texture(
+        original_meshes_list=mesh_model,
+        tex=tex,           # 形状为 [1, C, H, W] 的纹理张量
+        target_index_list=[1,3],
+        device=device)
     
     images_rnedered = load_parma_and_render_main(object_mesh=new_mesh1,
-                                                 backgroud=backgroud_images,
+                                                 background=backgroud_images,
                                                  path_camera_pose=camera_paths_list,
                                                  image_size=IMG_SIZE,
                                                  device=device,
@@ -838,459 +801,7 @@ def main_debug2():
     #
     
 
-def main():
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    mesh_model=model_generate_fixed(device)
-    camera=camera_generate_fixed(device)
-    light=light_set_fixed(device)
-    Rasterizer=rasterizer_set()
-    image=render_process( cameras=camera, 
-                         raster_settings= Rasterizer,
-                         lights= light,
-                         mesh=mesh_model,
-                         device=device)
 
-    # --------------------------------
-    # 7 显示
-    # --------------------------------
-    plt.figure(figsize=(6,6))
-    plt.imshow(image)
-    plt.axis("off")
-    plt.show()
-
-    plt.imsave("render_sphere.png", image)
-
-
-def main_debug1():
-
-    # -------------------------- 1. 配置路径与参数 --------------------------
-    # 数据路径（按你的需求指定）
-    root="/root/autodl-fs/data/data_test/carla_data/vehicle_tesla_model3/location_000/"
-    name="fixed_002"
-    RGB_PATH = os.path.join(root, "rgb", name+".png")       # RGB图路径
-    DEPTH_PATH = os.path.join(root, "depth", name+".png")   # 深度图路径
-    MASK_PATH = os.path.join(root, "mask", name+".png")     # 掩码图路径
-    POSE_PATH = os.path.join(root, "camera_pose", name+".npz")   # 位姿文件路径
-    INTRINSICS_PATH = os.path.join(root, "camera_intrinsics", name+".npz")  # 内参文件路径
-    SAVE_DIR = "./debug_results/exp2"  # 结果保存目录
-    OBJECT_OBJ_PATH = '/root/autodl-fs/data/object_model/TeslaModel3_blue.obj'  # OBJ模型路径
-
-    # 图像尺寸（从RGB图自动获取，也可手动指定）
-    IMG_SIZE = ( 720,1280)  # ( height,width)，若需自动获取可参考下方注释代码
-
-    # -------------------------- 2. 初始化设备与路径检查 --------------------------
-    # 设置计算设备
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    print(f"使用设备：{device}")
-
-    os.makedirs(SAVE_DIR, exist_ok=True)  # 创建保存目录
-    
-
-    # -------------------------- 3. 加载模型与相机参数 --------------------------
-    # 加载OBJ模型（替换原有球体模型）
-    print(f"加载OBJ模型：{OBJECT_OBJ_PATH}")
-    try:
-        mesh_model = load_obj_model(OBJECT_OBJ_PATH, device)
-    except Exception as e:
-        print(f"加载OBJ模型失败：{e}")
-        return
-
-    # 加载相机参数并生成相机（替换原有固定相机）
-    print(f"加载相机参数：\n  外参：{POSE_PATH}\n  内参：{INTRINSICS_PATH}")
-    try:
-        camera = generate_camera_from_params(
-            pose_path=POSE_PATH,
-            intrinsics_path=INTRINSICS_PATH,
-            device=device,
-            img_size=IMG_SIZE
-        )
-    except Exception as e:
-        print(f"生成相机失败：{e}")
-        return
-
-    # -------------------------- 4. 初始化渲染组件 --------------------------
-    # 固定光照（复用原有函数）
-    light = light_set_fixed(device)
-
-    # 光栅化设置（适配图像尺寸）
-    raster_settings = RasterizationSettings(
-        image_size=IMG_SIZE,  # 高度
-        blur_radius=0.0,
-        faces_per_pixel=1
-    )
-
-    # -------------------------- 5. 执行渲染 --------------------------
-    print("开始渲染模型...")
-    try:
-        image = render_process(
-            cameras=camera,
-            raster_settings=raster_settings,
-            lights=light,
-            mesh=mesh_model,
-            device=device
-        )
-    except Exception as e:
-        print(f"渲染失败：{e}")
-        return
-
-    # -------------------------- 6. 结果可视化与保存 --------------------------
-    # 显示渲染结果
-    plt.figure(figsize=(8, 6))
-    plt.imshow(image)
-    plt.title("OBJ Model Render (Real Camera Params)")
-    plt.axis("off")
-    plt.show()
-
-    # 保存渲染结果
-    save_path = os.path.join(SAVE_DIR, "render_tesla.png")
-    plt.imsave(save_path, image)
-    print(f"渲染结果已保存至：{save_path}")
-
-    # （可选）加载并显示原始RGB图对比
-    if os.path.exists(RGB_PATH):
-        rgb_img = load_rgb(RGB_PATH)
-        plt.figure(figsize=(12, 6))
-        plt.subplot(1, 2, 1)
-        plt.imshow(rgb_img)
-        plt.title("Original RGB Image")
-        plt.axis("off")
-        
-        plt.subplot(1, 2, 2)
-        plt.imshow(image)
-        plt.title("Rendered OBJ Model")
-        plt.axis("off")
-        
-        plt.tight_layout()
-        plt.show()
-        
-        # 保存对比图
-        compare_save_path = os.path.join(SAVE_DIR, "rgb_vs_render.png")
-        plt.savefig(compare_save_path, bbox_inches='tight', dpi=150)
-        print(f"RGB与渲染结果对比图已保存至：{compare_save_path}")
 
 if __name__ == "__main__":
     main_debug2()
-    # # ---------------- 配置区（修改为你的文件路径） ----------------
-    # RGB_PATH = "/root/autodl-fs/data/data_test/location_000_random/rgb/random_000.png"       # RGB图路径
-    # DEPTH_PATH = "/root/autodl-fs/data/data_test/location_000_random/depth/random_000.png"   # 深度图路径
-    # MASK_PATH = "/root/autodl-fs/data/data_test/location_000_random/mask/random_000.png"     # 掩码图路径
-    # POSE_PATH = "/root/autodl-fs/data/data_test/location_000_random/camera_pose/random_000.npz"   # 位姿文件路径
-    # INTRINSICS_PATH = "/root/autodl-fs/data/data_test/location_000_random/camera_intrinsics/random_000.npz"  # 内参文件路径
-    # SAVE_DIR = "./debug_results"  # 结果保存目录
-    # OBJECT_OBJ_PATH = '/root/autodl-fs/data/object_model/TeslaModel3.obj'  # OBJ模型路径
-    
-    # # 创建保存目录
-    # os.makedirs(SAVE_DIR, exist_ok=True)
-    
-    # # 设置设备（优先GPU）
-    # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # print(f"使用设备: {device}")
-
-    # # ---------------- 加载数据并打印信息 ----------------
-    # print("="*50)
-    # print("开始加载数据...")
-    # print("="*50)
-
-    # # 1. 加载RGB
-    # rgb = load_rgb(RGB_PATH)
-    # print(f"\n【RGB信息】")
-    # if rgb is not None:
-    #     print(f"形状: {rgb.shape} | 数据类型: {rgb.dtype} | 像素值范围: {rgb.min()}~{rgb.max()}")
-    #     # 保存RGB图
-    #     rgb_bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-    #     cv2.imwrite(os.path.join(SAVE_DIR, "rgb.png"), rgb_bgr)
-    #     print(f"✅ RGB图已保存到 {os.path.join(SAVE_DIR, 'rgb.png')}")
-    # else:
-    #     print("加载失败")
-
-    # # 2. 加载深度
-    # depth = load_depth(DEPTH_PATH)
-    # print(f"\n【深度图信息】")
-    # if depth is not None:
-    #     print(f"形状: {depth.shape} | 数据类型: {depth.dtype}")
-    #     print(f"深度范围: {depth.min():.2f} ~ {depth.max():.2f} 米")
-    #     # 保存深度可视化图+原始数据
-    #     depth_norm = (depth - np.min(depth)) / (np.max(depth) - np.min(depth)) * 255
-    #     depth_norm = depth_norm.astype(np.uint8)
-    #     cv2.imwrite(os.path.join(SAVE_DIR, "depth_vis.png"), depth_norm)
-    #     np.save(os.path.join(SAVE_DIR, "depth_raw.npy"), depth)
-    #     print(f"✅ 深度图（可视化+原始数据）已保存到 {SAVE_DIR}")
-    # else:
-    #     print("加载失败")
-
-    # # 3. 加载掩码
-    # mask = load_mask(MASK_PATH)
-    # print(f"\n【掩码图信息】")
-    # if mask is not None:
-    #     print(f"形状: {mask.shape} | 数据类型: {mask.dtype}")
-    #     print(f"掩码像素数: {np.sum(mask)} | 取值范围: {mask.min()}~{mask.max()}")
-    #     # 保存掩码图
-    #     mask_vis = mask * 255
-    #     cv2.imwrite(os.path.join(SAVE_DIR, "mask.png"), mask_vis)
-    #     print(f"✅ 掩码图已保存到 {os.path.join(SAVE_DIR, 'mask.png')}")
-    # else:
-    #     print("加载失败")
-
-    # # 4. 加载相机位姿
-    # pose = load_camera_pose(POSE_PATH)
-    # print(f"\n【相机位姿信息】")
-    # if pose is not None:
-    #     print(f"位置 (x,y,z): {[round(v, 3) for v in pose['location']] if pose['location'] is not None else '无'}")
-    #     print(f"旋转 (pitch,yaw,roll): {[round(v, 3) for v in pose['rotation']] if pose['rotation'] is not None else '无'}")
-    # else:
-    #     print("加载失败")
-
-    # # 5. 加载相机内参
-    # intrinsics = load_camera_intrinsics(INTRINSICS_PATH)
-    # print(f"\n【相机内参信息】")
-    # if intrinsics is not None:
-    #     print(f"内参矩阵 K:\n{intrinsics}")
-    # else:
-    #     print("加载失败")
-
-    # # 6. 加载OBJ模型（新增核心逻辑）
-    # print(f"\n【OBJ模型信息】")
-    # obj_mesh = None
-    # obj_render_img = None
-    # try:
-    #     # 加载OBJ模型
-    #     obj_mesh = load_obj_model(OBJECT_OBJ_PATH, device)
-        
-    #     # 打印模型关键信息
-    #     verts = obj_mesh.verts_packed()
-    #     faces = obj_mesh.faces_packed()
-    #     textures = obj_mesh.textures
-    #     print(f"模型路径: {OBJECT_OBJ_PATH}")
-    #     print(f"顶点数: {verts.shape[0]} | 面数: {faces.shape[0]}")
-    #     print(f"顶点范围: x({verts[:,0].min():.3f}~{verts[:,0].max():.3f}), y({verts[:,1].min():.3f}~{verts[:,1].max():.3f}), z({verts[:,2].min():.3f}~{verts[:,2].max():.3f})")
-    #     print(f"是否有纹理: {'是' if textures is not None else '否（已使用默认颜色）'}")
-        
-    #     # 渲染OBJ模型为2D图像（用于可视化）
-    #     obj_render_img = render_obj_mesh(obj_mesh, device)
-    #     # 保存渲染图
-    #     cv2.imwrite(os.path.join(SAVE_DIR, "obj_render.png"), cv2.cvtColor(obj_render_img, cv2.COLOR_RGB2BGR))
-    #     print(f"✅ OBJ模型渲染图已保存到 {os.path.join(SAVE_DIR, 'obj_render.png')}")
-        
-    # except Exception as e:
-    #     print(f"❌ 加载/渲染OBJ失败: {str(e)}")
-
-    # # ---------------- 保存相机参数到文本文件 ----------------
-    # param_file = os.path.join(SAVE_DIR, "camera_params.txt")
-    # with open(param_file, "w") as f:
-    #     f.write("=== 相机位姿 ===\n")
-    #     f.write(f"位置 (x,y,z): {pose['location'] if (pose and pose['location']) else '加载失败'}\n")
-    #     f.write(f"旋转 (pitch,yaw,roll): {pose['rotation'] if (pose and pose['rotation']) else '加载失败'}\n")
-    #     f.write("\n=== 相机内参矩阵 K ===\n")
-    #     if intrinsics is not None:
-    #         f.write(np.array2string(intrinsics, precision=2))
-    #     else:
-    #         f.write("加载失败")
-    # print(f"\n✅ 相机参数已保存到 {param_file}")
-
-    # # ---------------- 保存OBJ模型信息到文本文件 ----------------
-    # obj_info_file = os.path.join(SAVE_DIR, "obj_model_info.txt")
-    # with open(obj_info_file, "w") as f:
-    #     f.write("=== OBJ模型信息 ===\n")
-    #     f.write(f"模型路径: {OBJECT_OBJ_PATH}\n")
-    #     if obj_mesh is not None:
-    #         verts = obj_mesh.verts_packed()
-    #         faces = obj_mesh.faces_packed()
-    #         f.write(f"顶点数: {verts.shape[0]}\n")
-    #         f.write(f"面数: {faces.shape[0]}\n")
-    #         f.write(f"顶点范围 - X: {verts[:,0].min():.3f} ~ {verts[:,0].max():.3f}\n")
-    #         f.write(f"顶点范围 - Y: {verts[:,1].min():.3f} ~ {verts[:,1].max():.3f}\n")
-    #         f.write(f"顶点范围 - Z: {verts[:,2].min():.3f} ~ {verts[:,2].max():.3f}\n")
-    #         f.write(f"是否有纹理: {'是' if obj_mesh.textures is not None else '否'}\n")
-    #     else:
-    #         f.write("模型加载失败\n")
-    # print(f"✅ OBJ模型信息已保存到 {obj_info_file}")
-
-    # # ---------------- 可视化显示（新增OBJ渲染图） ----------------
-    # print("\n" + "="*50)
-    # print("开始可视化显示...（关闭窗口后程序结束）")
-    # print("="*50)
-    
-    # # 调整子图布局（新增OBJ渲染图列）
-    # plt.figure(figsize=(20, 5))
-    
-    # # 子图1：RGB
-    # plt.subplot(1, 4, 1)
-    # if rgb is not None:
-    #     plt.imshow(rgb)
-    #     plt.title("RGB Image")
-    # else:
-    #     plt.text(0.5, 0.5, "RGB加载失败", ha="center", va="center")
-    # plt.axis("off")
-
-    # # 子图2：深度图
-    # plt.subplot(1, 4, 2)
-    # if depth is not None:
-    #     plt.imshow(depth, cmap="plasma")
-    #     plt.title(f"Depth Map (min:{depth.min():.1f}m, max:{depth.max():.1f}m)")
-    #     plt.colorbar(shrink=0.8)
-    # else:
-    #     plt.text(0.5, 0.5, "深度图加载失败", ha="center", va="center")
-    # plt.axis("off")
-
-    # # 子图3：掩码图
-    # plt.subplot(1, 4, 3)
-    # if mask is not None:
-    #     plt.imshow(mask, cmap="gray")
-    #     plt.title(f"Mask (pixels: {np.sum(mask):.0f})")
-    # else:
-    #     plt.text(0.5, 0.5, "掩码图加载失败", ha="center", va="center")
-    # plt.axis("off")
-
-    # # 子图4：OBJ模型渲染图（新增）
-    # plt.subplot(1, 4, 4)
-    # if obj_render_img is not None:
-    #     plt.imshow(obj_render_img)
-    #     plt.title(f"OBJ Model (verts: {obj_mesh.verts_packed().shape[0]:.0f})")
-    # else:
-    #     plt.text(0.5, 0.5, "OBJ加载/渲染失败", ha="center", va="center")
-    # plt.axis("off")
-
-    # plt.tight_layout()
-    # # 保存组合可视化图
-    # plt.savefig(os.path.join(SAVE_DIR, "debug_vis_with_obj.png"), dpi=150, bbox_inches="tight")
-    # plt.show()
-
-    # print("\n✅ 调试程序执行完成！")
-    # print(f"所有结果已保存到: {os.path.abspath(SAVE_DIR)}")
-
-
-# # # ================= 主程序（仅保留该块，无新增函数） =================
-# # if __name__ == "__main__":
-#     # ---------------- 配置区（修改为你的文件路径） ----------------
-#     RGB_PATH = "/root/autodl-fs/data/data_test/location_000_random/rgb/random_000.png"       # RGB图路径
-#     DEPTH_PATH = "/root/autodl-fs/data/data_test/location_000_random/depth/random_000.png"   # 深度图路径
-#     MASK_PATH = "/root/autodl-fs/data/data_test/location_000_random/mask/random_000.png"     # 掩码图路径
-#     POSE_PATH = "/root/autodl-fs/data/data_test/location_000_random/camera_pose/random_000.npz"   # 位姿文件路径
-#     INTRINSICS_PATH = "/root/autodl-fs/data/data_test/location_000_random/camera_intrinsics/random_000.npz"  # 内参文件路径
-#     SAVE_DIR = "./debug_results"  # 结果保存目录
-#     object_path='/root/autodl-fs/data/object_model/TeslaModel3.obj'
-#     # 创建保存目录
-#     os.makedirs(SAVE_DIR, exist_ok=True)
-
-#     # ---------------- 加载数据并打印信息 ----------------
-#     print("="*50)
-#     print("开始加载数据...")
-#     print("="*50)
-
-#     # 1. 加载RGB
-#     rgb = load_rgb(RGB_PATH)
-#     print(f"\n【RGB信息】")
-#     if rgb is not None:
-#         print(f"形状: {rgb.shape} | 数据类型: {rgb.dtype} | 像素值范围: {rgb.min()}~{rgb.max()}")
-#         # 保存RGB图
-#         rgb_bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-#         cv2.imwrite(os.path.join(SAVE_DIR, "rgb.png"), rgb_bgr)
-#         print(f"✅ RGB图已保存到 {os.path.join(SAVE_DIR, 'rgb.png')}")
-#     else:
-#         print("加载失败")
-
-#     # 2. 加载深度
-#     depth = load_depth(DEPTH_PATH)
-#     print(f"\n【深度图信息】")
-#     if depth is not None:
-#         print(f"形状: {depth.shape} | 数据类型: {depth.dtype}")
-#         print(f"深度范围: {depth.min():.2f} ~ {depth.max():.2f} 米")
-#         # 保存深度可视化图+原始数据
-#         depth_norm = (depth - np.min(depth)) / (np.max(depth) - np.min(depth)) * 255
-#         depth_norm = depth_norm.astype(np.uint8)
-#         cv2.imwrite(os.path.join(SAVE_DIR, "depth_vis.png"), depth_norm)
-#         np.save(os.path.join(SAVE_DIR, "depth_raw.npy"), depth)
-#         print(f"✅ 深度图（可视化+原始数据）已保存到 {SAVE_DIR}")
-#     else:
-#         print("加载失败")
-
-#     # 3. 加载掩码
-#     mask = load_mask(MASK_PATH)
-#     print(f"\n【掩码图信息】")
-#     if mask is not None:
-#         print(f"形状: {mask.shape} | 数据类型: {mask.dtype}")
-#         print(f"最大蓝色区域像素数: {np.sum(mask)} | 取值范围: {mask.min()}~{mask.max()}")
-#         # 保存掩码图
-#         mask_vis = mask * 255
-#         cv2.imwrite(os.path.join(SAVE_DIR, "mask.png"), mask_vis)
-#         print(f"✅ 掩码图已保存到 {os.path.join(SAVE_DIR, 'mask.png')}")
-#     else:
-#         print("加载失败")
-
-#     # 4. 加载相机位姿
-#     pose = load_camera_pose(POSE_PATH)
-#     print(f"\n【相机位姿信息】")
-#     if pose is not None:
-#         print(f"位置 (x,y,z): {[round(v, 3) for v in pose['location']]}")
-#         print(f"旋转 (pitch,yaw,roll): {[round(v, 3) for v in pose['rotation']]}")
-#     else:
-#         print("加载失败")
-
-#     # 5. 加载相机内参
-#     intrinsics = load_camera_intrinsics(INTRINSICS_PATH)
-#     print(f"\n【相机内参信息】")
-#     if intrinsics is not None:
-#         print(f"内参矩阵 K:\n{intrinsics}")
-#     else:
-#         print("加载失败")
-
-#     # ---------------- 保存相机参数到文本文件 ----------------
-#     param_file = os.path.join(SAVE_DIR, "camera_params.txt")
-#     with open(param_file, "w") as f:
-#         f.write("=== 相机位姿 ===\n")
-#         f.write(f"位置 (x,y,z): {pose if pose else '加载失败'}\n")
-#         f.write(f"旋转 (pitch,yaw,roll): {pose['rotation'] if pose else '加载失败'}\n")
-#         f.write("\n=== 相机内参矩阵 K ===\n")
-#         if intrinsics is not None:
-#             f.write(np.array2string(intrinsics, precision=2))
-#         else:
-#             f.write("加载失败")
-#     print(f"\n✅ 相机参数已保存到 {param_file}")
-
-#     # ---------------- 可视化显示 ----------------
-#     print("\n" + "="*50)
-#     print("开始可视化显示...（关闭窗口后程序结束）")
-#     print("="*50)
-    
-#     # 创建子图
-#     plt.figure(figsize=(15, 5))
-    
-#     # 子图1：RGB
-#     plt.subplot(1, 3, 1)
-#     if rgb is not None:
-#         plt.imshow(rgb)
-#         plt.title("RGB Image")
-#     else:
-#         plt.text(0.5, 0.5, "RGB加载失败", ha="center", va="center")
-#     plt.axis("off")
-
-#     # 子图2：深度图
-#     plt.subplot(1, 3, 2)
-#     if depth is not None:
-#         plt.imshow(depth, cmap="plasma")
-#         plt.title(f"Depth Map (min:{depth.min():.1f}m, max:{depth.max():.1f}m)")
-#         plt.colorbar(shrink=0.8)
-#     else:
-#         plt.text(0.5, 0.5, "深度图加载失败", ha="center", va="center")
-#     plt.axis("off")
-
-#     # 子图3：掩码图
-#     plt.subplot(1, 3, 3)
-#     if mask is not None:
-#         plt.imshow(mask, cmap="gray")
-#         plt.title(f"Mask (max blue area: {np.sum(mask)} pixels)")
-#     else:
-#         plt.text(0.5, 0.5, "掩码图加载失败", ha="center", va="center")
-#     plt.axis("off")
-
-#     plt.tight_layout()
-#     plt.show()
-#     # 保存图片
-#     plt.savefig(os.path.join(SAVE_DIR, "debug_vis.png"))
-
-#     print("\n✅ 调试程序执行完成！")
-
-
-
-
-
