@@ -31,7 +31,66 @@ from adv_attack import *
 from adv_attack.attack_class import *
 from adv_attack.util import *
 
-
+def get_contour_canny_tensor(
+    input_image: np.ndarray,
+    image_resolution: int = 512,
+    num_samples: int = 1,
+    low_threshold: int = 50,  # 二值化/ Canny 低阈值
+    high_threshold: int = 150, # 二值化/ Canny 高阈值
+    device: Optional[torch.device] = None
+) -> torch.Tensor:
+    """
+    先提取图像轮廓 → 再对轮廓图执行 Canny 边缘检测，返回 B×C×H×W 格式的 float32 张量
+    参数：
+        input_image: 输入图像（np.ndarray），支持格式：
+                     - RGB/BGR: (H, W, 3)
+                     - 灰度图: (H, W)
+                     - RGBA: (H, W, 4)（自动丢弃 Alpha 通道）
+        image_resolution: 图像缩放分辨率（默认 512）
+        num_samples: 批量维度（B，默认 1）
+        low_threshold: 二值化+ Canny 低阈值（0~255，默认 50）
+        high_threshold: 二值化+ Canny 高阈值（0~255，默认 150）
+        device: 输出张量设备（默认自动检测 GPU/CPU）
+    返回：
+        torch.Tensor: 形状 (B, 3, H, W)，数值范围 0.0~1.0（0=背景，1=轮廓+Canny边缘），dtype=float32
+    """
+    # 1. 自动检测设备
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # 2. 图像预处理：统一格式+缩放
+    img = HWC3(input_image)  # 转为 (H, W, 3)
+    img = resize_image(img, image_resolution)  # 缩放到目标分辨率
+    
+    # 3. 第一步：提取图像轮廓
+    # 3.1 转灰度图
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    # 3.2 二值化（用传入的阈值）
+    _, binary = cv2.threshold(gray, low_threshold, high_threshold, cv2.THRESH_BINARY)
+    # 3.3 提取最外层轮廓
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # 3.4 绘制轮廓到空白画布
+    contour_map = np.zeros_like(gray, dtype=np.uint8)
+    cv2.drawContours(contour_map, contours, -1, (255), thickness=2)  # 轮廓线宽2
+    
+    # 4. 第二步：对轮廓图执行 Canny 边缘检测
+    canny_on_contour = cv2.Canny(contour_map, low_threshold, high_threshold)
+    # 转为3通道（保持格式统一）
+    canny_on_contour = HWC3(canny_on_contour)
+    
+    # 5. 张量转换+归一化（0~255 → 0.0~1.0）
+    control = torch.from_numpy(canny_on_contour.copy()).float().to(device) / 255.0
+    
+    # 6. 增加批量维度（复制num_samples份）
+    control = torch.stack([control for _ in range(num_samples)], dim=0)
+    
+    # 7. 调整维度顺序：B×H×W×C → B×C×H×W（PyTorch标准格式）
+    control = einops.rearrange(control, 'b h w c -> b c h w').contiguous()
+    
+    # 8. 确保类型为float32（兼容训练）
+    control = control.to(dtype=torch.float32)
+    
+    return control
 def get_canny_edge_tensor(
     input_image: np.ndarray,
     image_resolution: int = 512,
@@ -133,7 +192,63 @@ def get_canny_edge_tensor1(
     
     return control
 
-
+def get_contour_tensor(
+    input_image: np.ndarray,
+    image_resolution: int = 512,
+    num_samples: int = 1,
+    low_threshold: int = 50,  # 二值化低阈值（适配原参数名）
+    high_threshold: int = 150, # 二值化高阈值（适配原参数名）
+    device: Optional[torch.device] = None
+) -> torch.Tensor:
+    """
+    对输入图像执行轮廓提取，返回 B×C×H×W 格式的 float32 张量
+    参数：
+        input_image: 输入图像（np.ndarray），支持格式：
+                     - RGB/BGR: (H, W, 3)
+                     - 灰度图: (H, W)
+                     - RGBA: (H, W, 4)（自动丢弃 Alpha 通道）
+        image_resolution: 图像缩放分辨率（默认 512）
+        num_samples: 批量维度（B，默认 1）
+        low_threshold: 二值化低阈值（0~255，默认 50）
+        high_threshold: 二值化高阈值（0~255，默认 150）
+        device: 输出张量设备（默认自动检测 GPU/CPU）
+    返回：
+        torch.Tensor: 形状 (B, 3, H, W)，数值范围 0.0~1.0（0=背景，1=轮廓），dtype=float32
+    """
+    # 1. 自动检测设备
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # 2. 图像预处理：强制转为 3 通道 + 缩放到指定分辨率
+    img = HWC3(input_image)  # 转为 (H, W, 3)（兼容灰度/RGBA）
+    img = resize_image(img, image_resolution)  # 缩放至目标分辨率
+    
+    # 3. 轮廓提取核心逻辑
+    # 3.1 转为灰度图
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    # 3.2 二值化（使用传入的阈值参数）
+    _, binary = cv2.threshold(gray, low_threshold, high_threshold, cv2.THRESH_BINARY)
+    # 3.3 提取轮廓（只保留最外层轮廓）
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # 3.4 创建空白画布绘制轮廓
+    contour_map = np.zeros_like(gray, dtype=np.uint8)
+    cv2.drawContours(contour_map, contours, -1, (255), thickness=2)  # thickness=2 控制轮廓线宽
+    # 3.5 转为3通道（保持与Canny函数输出格式一致）
+    contour_map = HWC3(contour_map)
+    
+    # 4. 转为张量 + 归一化（0~255 → 0.0~1.0）
+    control = torch.from_numpy(contour_map.copy()).float().to(device) / 255.0
+    
+    # 5. 增加批量维度（B）：复制 num_samples 份
+    control = torch.stack([control for _ in range(num_samples)], dim=0)
+    
+    # 6. 调整维度顺序：B×H×W×C → B×C×H×W（PyTorch 标准格式）
+    control = einops.rearrange(control, 'b h w c -> b c h w').contiguous()
+    
+    # 7. 确保类型为 float32（避免 bfloat16 等兼容问题）
+    control = control.to(dtype=torch.float32)
+    
+    return control
 import argparse  # 导入argparse库
 
 # 1. 创建参数解析器
@@ -190,7 +305,7 @@ if __name__ == '__main__':
 
     imgsize_width=attack.exp_params["image_size"]
 
-    img = cv2.imread(r'./test_imgs/dog2.png')  # BGR 格式 (H, W, 3)
+    img = cv2.imread(r'./test_imgs/11.png')  # BGR 格式 (H, W, 3)
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # 转为 RGB
     
     # 2. 调用 Canny 函数
@@ -198,9 +313,25 @@ if __name__ == '__main__':
         input_image=img,
         image_resolution=512,
         num_samples=1,
-        low_threshold=50,
-        high_threshold=150
+        low_threshold=100,
+        high_threshold=200
     )
+
+    # canny_tensor = get_contour_tensor(
+    #     input_image=img,
+    #     image_resolution=512,
+    #     num_samples=1,
+    #     low_threshold=10,
+    #     high_threshold=200
+    # )
+    
+    # canny_tensor = get_contour_canny_tensor(
+    #     input_image=img,
+    #     image_resolution=512,
+    #     num_samples=1,
+    #     low_threshold=10,
+    #     high_threshold=200
+    # )
 
     # canny_tensor = get_canny_edge_tensor1(
     #     input_image=img,
