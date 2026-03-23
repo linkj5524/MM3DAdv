@@ -595,7 +595,7 @@ class YOLOv11DetectionLoss(nn.Module):
 
                 # 4. 映射回原始预测框的索引，并检查匹配有效性
                 best_pred_idx = unmatched_pred_indices[sub_best_idx]  # 子集索引 → 原始索引
-                valid = (iou_matrix[best_pred_idx] >= self.iou_thres) 
+                valid = (iou_matrix[sub_best_idx] >= self.iou_thres) 
                 # valid = (iou_matrix[sub_best_idx] >= 0)  # 检查IoU有效性
                 if not valid:
                     # 无效匹配：施加惩罚
@@ -3664,7 +3664,7 @@ class RGBCameraPoseDataset(Dataset):
         self.pose_ext = pose_ext
 
         # 1. 定义RGB和位姿文件夹路径
-        self.rgb_dir = os.path.join(root_dir, "rgb")
+        self.rgb_dir = os.path.join(root_dir, "background")
         self.pose_dir = os.path.join(root_dir, "camera_pose")
         
         # 2. 校验文件夹是否存在

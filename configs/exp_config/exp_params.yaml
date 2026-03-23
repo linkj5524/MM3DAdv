@@ -43,10 +43,13 @@ class_loss_weight : 1  # 1
 
 
 experiment_path: "exp/260112_optim_test/"
-train_root_dir : "/root/autodl-fs/data/data_test/carla_data/vehicle_tesla_model3/location_000"
-val_root_dir : "/root/autodl-fs/data/data_test/carla_data/vehicle_tesla_model3/location_000"
+train_root_dir : "/root/autodl-fs/data/tesla_model3/location_000"
+val_root_dir : "/root/autodl-fs/data/tesla_model3/location_000_random"
 
 batch_size: 1
 num_workers: 4
 
-mesh_model_path: "/root/autodl-fs/data/object_model/byd_yangwang.obj"
+mesh_model_path: "/root/autodl-fs/data/object_model/byd_yangwang_u9_whole.obj"
+
+target_material_dict :
+  - "body"

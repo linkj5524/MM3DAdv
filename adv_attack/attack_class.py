@@ -3408,9 +3408,12 @@ class MM3DAdv_ATTACK:
         # loader
         self.optim.train_loader= train_loader
         self.optim.val_loader= val_loader
-        mesh_model_t=load_obj_model(self.exp_params["mesh_model_path"], 
+        
+        mesh_model_t,material_list=load_obj_model_return_mesh_material(self.exp_params["mesh_model_path"], 
                                 optim_device)
         self.optim.mesh_model =mesh_model_t
+        self.optim.material_list=material_list
+        self.optim.target_material=self.exp_params["target_material_dict"]
 
 
     def optim_step(self):
@@ -3449,7 +3452,7 @@ class MM3DAdv_ATTACK:
                 # 初始化object mesh
 
                 ## 直接render
-
+                
                 origin_com_tensor_rendered = load_parma_and_render_main(object_mesh=self.optim.mesh_model,
                                                                 background=backgroud_images,
                                                                 path_camera_pose=cameras_pose_path,
@@ -3461,12 +3464,19 @@ class MM3DAdv_ATTACK:
                 ## 纹理贴图渲染
 
 
-                new_mesh_rendered_adv_com=update_meshes_texture(
-                        original_meshes_list=self.optim.mesh_model,
-                        tex=adv_texture_resized,           # 形状为 [1, C, H, W] 的纹理张量
-                        target_index_list=[1,3],
-                        device=self.optim.optim_device)
+                # new_mesh_rendered_adv_com=update_meshes_texture(
+                #         original_meshes_list=self.optim.mesh_model,
+                #         tex=adv_texture_resized,           # 形状为 [1, C, H, W] 的纹理张量
+                #         target_index_list=[1,3],
+                #         device=self.optim.optim_device)
+                for i in range(len(self.optim.target_material)):
+                    target_index_dict={self.optim.target_material[i]: adv_texture_resized[i]}
 
+                new_mesh_rendered_adv_com=update_meshes_texture_dict(
+                    original_meshes_list=self.optim.mesh_model,
+                    target_index_dict=target_index_dict,           # 形状为 [1, C, H, W] 的纹理张量
+                    material_names_list=self.optim.material_list,
+                    device=self.optim.optim_device)
                 adv_com_tensor_rendered = load_parma_and_render_main(object_mesh=new_mesh_rendered_adv_com,
                                                                 background=backgroud_images,
                                                                 path_camera_pose=cameras_pose_path,
