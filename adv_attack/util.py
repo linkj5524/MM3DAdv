@@ -3809,6 +3809,44 @@ def build_RGBCameraPose_dataloader(
     
 #     return resized_tensor
 
+def resize_tensor_ratio_pad(tensor: torch.Tensor, height: int, width: int, fill: float = 0.0):
+    """
+    保留原有参数名，等比例缩放 + 居中 + 黑色填充
+    输入：tensor (C, H, W) 或 (B, C, H, W)
+    输出：缩放后尺寸 (C, height, width) 或 (B, C, height, width)
+    """
+    # 判断是否为 batch
+    is_batch = tensor.dim() == 4
+    if not is_batch:
+        tensor = tensor.unsqueeze(0)  # [B, C, H, W]
+
+    B, C, H, W = tensor.shape
+    target_h, target_w = height, width
+
+    # 计算等比例缩放的比例
+    scale = min(target_h / H, target_w / W)
+    new_h = int(H * scale)
+    new_w = int(W * scale)
+
+    # 等比例缩放
+    tensor = torchvision.transforms.functional.resize(tensor, [new_h, new_w], antialias=True)
+
+    # 计算居中填充
+    pad_top = (target_h - new_h) // 2
+    pad_bottom = target_h - new_h - pad_top
+    pad_left = (target_w - new_w) // 2
+    pad_right = target_w - new_w - pad_left
+
+    # 填充黑色
+    tensor = torchvision.transforms.functional.pad(tensor, [pad_left, pad_top, pad_right, pad_bottom], fill=fill)
+
+    # 恢复维度
+    if not is_batch:
+        tensor = tensor.squeeze(0)
+
+    return tensor
+
+
 
 def resize_tensor(adv_tensor_generate, height, width, mode='bilinear', align_corners=False):
     """
@@ -3850,3 +3888,111 @@ def resize_tensor(adv_tensor_generate, height, width, mode='bilinear', align_cor
         resized_tensor = resized_tensor.to(orig_dtype)
     
     return resized_tensor
+
+
+
+
+
+# class HistogramUVLoss(nn.Module):
+#     def __init__(self, bins=256, min=0.0, max=1.0):
+#         super().__init__()
+#         self.bins = bins
+#         self.min = min
+#         self.max = max
+
+#     def forward(self, xt_list, bg_list):
+#         """
+#         自动适配任意尺寸图像！
+#         xt_list: [N, C, H1, W1]  可以是任意大小
+#         bg_list: [M, C, H2, W2]  可以是任意大小
+#         return: 所有 xt 与所有 bg 的直方图 UV 损失均值
+#         """
+#         # 自动变成 [N, C, pixels] 和 [M, C, pixels]（无视尺寸）
+#         xt_flat = xt_list.flatten(2)  # (N, C, S)
+#         bg_flat = bg_list.flatten(2)  # (M, C, T)
+
+#         loss_total = []
+
+#         # 遍历每一个 xt 和每一个 bg
+#         for xt in xt_flat:            # xt: (C, S)
+#             for bg in bg_flat:        # bg: (C, T)
+#                 loss = self._single_loss(xt, bg)
+#                 loss_total.append(loss)
+
+#         return torch.mean(torch.stack(loss_total))
+
+#     def _single_loss(self, xt, bg):
+#         # 计算每个通道的软直方图
+#         hist_xt = self._soft_hist(xt)
+#         hist_bg = self._soft_hist(bg)
+#         # L2 损失（你的公式）
+#         return torch.norm(hist_xt - hist_bg, p=2)
+
+#     def _soft_hist(self, x):
+#         # 可微分软直方图，无视输入尺寸
+#         C, N = x.shape
+#         centers = torch.linspace(self.min, self.max, self.bins, device=x.device)
+#         sigma = (self.max - self.min) / self.bins / 2
+#         x = x.unsqueeze(-1)
+#         diff = x - centers.view(1, 1, self.bins)
+#         kernel = torch.exp(-diff ** 2 / (2 * sigma ** 2))
+#         hist = kernel.sum(1)
+#         hist = hist / (hist.sum(-1, keepdim=True) + 1e-8)
+#         return hist
+
+class HistogramUVLoss(nn.Module):
+    def __init__(self, bins=256, min_val=0.0, max_val=1.0):
+        super().__init__()
+        self.bins = bins
+        self.min_val = min_val
+        self.max_val = max_val
+
+    def forward(self, xt, bg):
+        """
+        完全保留原有 forward 接口！
+        xt: 可以是 BCHW tensor / list of CHW
+        bg: 可以是 BCHW tensor / list of CHW
+        自动计算所有 xt 与所有 bg 的 UV 直方图损失，返回均值
+        """
+        # ----------------------
+        # 统一格式：转成 [CHW, CHW, ...]
+        # ----------------------
+        def to_list(x):
+            if isinstance(x, list):
+                return x
+            if x.dim() == 4:  # BCHW
+                return [x[i] for i in range(x.shape[0])]
+            elif x.dim() == 3:  # CHW
+                return [x]
+            else:
+                raise ValueError(f"不支持的输入维度: {x.dim()}")
+
+        xt_list = to_list(xt)
+        bg_list = to_list(bg)
+
+        # ----------------------
+        # 可微分软直方图
+        # ----------------------
+        def soft_hist(x):
+            x = x.flatten(1)  # (C, H*W)
+            centers = torch.linspace(self.min_val, self.max_val, self.bins, device=x.device)
+            sigma = (self.max_val - self.min_val) / self.bins / 2.0
+            x = x.unsqueeze(-1)
+            diff = x - centers.view(1, 1, self.bins)
+            kernel = torch.exp(-diff ** 2 / (2 * sigma ** 2))
+            hist = kernel.sum(1)
+            hist = hist / (hist.sum(dim=-1, keepdim=True) + 1e-8)
+            return hist
+
+        # ----------------------
+        # 两两计算损失
+        # ----------------------
+        losses = []
+        for x in xt_list:
+            hist_x = soft_hist(x)
+            for b in bg_list:
+                hist_b = soft_hist(b)
+                loss = torch.norm(hist_x - hist_b, p=2)
+                losses.append(loss)
+
+        return torch.stack(losses).mean()

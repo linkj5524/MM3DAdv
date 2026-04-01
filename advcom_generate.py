@@ -305,7 +305,7 @@ if __name__ == '__main__':
 
     imgsize_width=attack.exp_params["image_size"]
 
-    img = cv2.imread(r'./test_imgs/11.png')  # BGR 格式 (H, W, 3)
+    img = cv2.imread(r'./test_imgs/texture.jpg')  # BGR 格式 (H, W, 3)
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # 转为 RGB
     
     # 2. 调用 Canny 函数

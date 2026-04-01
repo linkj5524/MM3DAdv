@@ -8,8 +8,8 @@ render_size:
   height: 720
 device: "cuda"  
 # optim params
-optim_epochs: 20
-lr: 0.5     #0.05   # 默认0.5
+optim_epochs: 5
+lr: 0.05     #0.05   # 默认0.5
 lr_step: 40 # 10
 lr_decay: 0.8
 
@@ -20,7 +20,7 @@ use_amp : false
 use_bf16 : true 
 
 
-adv_loss_type: 2   
+adv_loss_type: 1   
 
 # 0:表示与gt的交叉熵最大；
 # 1:表示最小化当前预测类别的置信度；
@@ -36,11 +36,11 @@ target_class_ref: 0 # 目标类别，参考COCO类别对应,
 
 
 
-TV_loss_weight: 0
-conext_loss_weight: 200 ## 默认 1：1000 默认2：2000
-perceptual_loss_weight: 100 ## 默认1： 1000 默认2：1000
+TV_loss_weight: 0.1
+conext_loss_weight: 0.1 ## 默认 1：1000 默认2：2000
+perceptual_loss_weight: 0 ## 默认1： 1000 默认2：1000
 class_loss_weight : 1  # 1  
-
+HUV_loss_weight : 0.8
 
 experiment_path: "exp/260112_optim_test/"
 train_root_dir : "/root/autodl-fs/data/tesla_model3/location_000"
