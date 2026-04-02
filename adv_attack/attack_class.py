@@ -3419,11 +3419,14 @@ class MM3DAdv_ATTACK:
 
     def optim_step(self):
 
-
+        epoch_false_pos_rates = []
         self.optim.optimizer.zero_grad()
         use_amp = self.exp_params.get("use_amp", False)  # 是否启用AMP
         use_bf16 = self.exp_params.get("use_bf16", False)  # 是否启用BF16（优先级高于FP32）
         for epoch in tqdm(range(self.exp_params["optim_epochs"]), desc="Optimizing"):
+            epoch_total_fp = 0
+            epoch_batch_count = 0
+            step=0
             for backgroud_images ,cameras_pose_path in self.optim.train_loader:
                 backgroud_images=backgroud_images.to(self.optim.optim_device)
                 # ========== 前向传播（AMP上下文） ==========
@@ -3446,15 +3449,15 @@ class MM3DAdv_ATTACK:
                     image_size_render=( self.exp_params["render_size"]["height"], 
                                 self.exp_params["render_size"]["width"])
                     # resize
-                    adv_texture_resized = resize_tensor(adv_tensor_generate, 
-                                                    height=image_size_render[0], 
-                                                        width=image_size_render[1])
+                    # adv_texture_resized = resize_tensor(adv_tensor_generate, 
+                    #                                 height=image_size_render[0], 
+                    #                                     width=image_size_render[1])
                     # render 渲染
                     # 初始化object mesh
 
                     ## 直接render
                     
-                    origin_com_tensor_rendered = load_parma_and_render_main(object_mesh=self.optim.mesh_model,
+                    origin_com_tensor_rendered,object_mask = load_parma_and_render_main(object_mesh=self.optim.mesh_model,
                                                                     background=backgroud_images,
                                                                     path_camera_pose=cameras_pose_path,
                                                                     image_size=image_size_render,
@@ -3463,22 +3466,22 @@ class MM3DAdv_ATTACK:
                                                                     blur_radius=0.0,
                                                                     faces_per_pixel=1)
                     ## 纹理贴图渲染
+                    if len(self.optim.target_material) == len(adv_tensor_generate):
+                        target_index_dict = {}
+                        for mat, tex in zip(self.optim.target_material, adv_tensor_generate):
+                            target_index_dict[mat] = tex
+                    else:
+                        #  修复：加 .detach() 保持梯度流
 
-
-                    # new_mesh_rendered_adv_com=update_meshes_texture(
-                    #         original_meshes_list=self.optim.mesh_model,
-                    #         tex=adv_texture_resized,           # 形状为 [1, C, H, W] 的纹理张量
-                    #         target_index_list=[1,3],
-                    #         device=self.optim.optim_device)
-                    for i in range(len(self.optim.target_material)):
-                        target_index_dict={self.optim.target_material[i]: adv_texture_resized[i]}
+                        adv_tex = adv_tensor_generate[0] if adv_tensor_generate.ndim == 4 else adv_tensor_generate
+                        target_index_dict = {mat: adv_tex for mat in self.optim.target_material}
 
                     new_mesh_rendered_adv_com=update_meshes_texture_dict(
                         original_meshes_list=self.optim.mesh_model,
                         target_index_dict=target_index_dict,           # 形状为 [1, C, H, W] 的纹理张量
                         material_names_list=self.optim.material_list,
                         device=self.optim.optim_device)
-                    adv_com_tensor_rendered = load_parma_and_render_main(object_mesh=new_mesh_rendered_adv_com,
+                    adv_com_tensor_rendered,_ = load_parma_and_render_main(object_mesh=new_mesh_rendered_adv_com,
                                                                     background=backgroud_images,
                                                                     path_camera_pose=cameras_pose_path,
                                                                     image_size=image_size_render,
@@ -3501,7 +3504,7 @@ class MM3DAdv_ATTACK:
                     # 检测模型前向
                     result_object_adv_com, _ = self.optim.object_detect.detect_eval(
                         adv_com_tensor_rendered_sized,
-                        file_path="./visualization",
+                        file_path=["./exp/visualization"]*self.exp_params["batch_size"],
                         file_name='result_generate.jpg',
                         grad_status=True,
                         model_type=detect_model_type
@@ -3511,13 +3514,28 @@ class MM3DAdv_ATTACK:
                                                     height=detect_image_size, 
                                                         width=detect_image_size)
                     
+
+                    
                     result_object_origin, _ = self.optim.object_detect.detect_eval(
-                        origin_com_tensor_rendered_sized,
-                        file_path="./visualization",
+                        origin_com_tensor_rendered_sized,# origin_com_tensor_rendered_sized,
+                        file_path=["./exp/visualization"]*self.exp_params["batch_size"],
                         file_name='result_generate1.jpg',
                         grad_status=True,
                         model_type=detect_model_type
                     )
+
+                    # 获取mask
+                    object_mask_resize=resize_tensor_ratio_pad(object_mask, 
+                                                    height=detect_image_size, 
+                                                        width=detect_image_size)
+                    result_object_origin_only_object_gt=mask_to_gt_dict(
+                            mask_tensor=object_mask_resize,
+                            label=self.exp_params['target_class'],
+                            num_classes=self.detect_params["nums_class"],
+                            device=self.optim.optim_device,
+                            threshold = 1e-3
+                        )
+                    
 
                     origin_com_tensor_rendered_sized=move_to_gpu_and_cast_dtype(origin_com_tensor_rendered_sized, self.optim.optim_device, self.optim.optim_data_type)
                     adv_com_tensor_rendered_sized=move_to_gpu_and_cast_dtype(adv_com_tensor_rendered_sized, self.optim.optim_device, self.optim.optim_data_type)
@@ -3540,21 +3558,23 @@ class MM3DAdv_ATTACK:
                                                             normalize_to_01(adv_com_tensor_rendered_sized))
 
                     # UV 损失
+                    huv_loss = torch.tensor(0.0, device=self.optim.optim_device, dtype=self.optim.optim_data_type)
                     if self.exp_params["HUV_loss_weight"] > 0:
-                        tv_loss = self.optim.huvloss(xt=adv_tensor_generate,bg=backgroud_images)
+                        huv_loss = self.optim.huvloss(xt=adv_tensor_generate,bg=backgroud_images)
 
                     
 
                     # 检测损失,默认输出对抗损失，即需要最小化loss。
 
-                    loss, loss_dict = self.optim.cross_entro_loss(result_object_origin, result_object_adv_com)
+                    loss, loss_dict = self.optim.cross_entro_loss(result_object_adv_com,result_object_origin_only_object_gt)
 
                     # 总损失
                     total_loss = (
-                        + self.exp_params["TV_loss_weight"] * tv_loss
+                        self.exp_params["TV_loss_weight"] * tv_loss
                         + self.exp_params["perceptual_loss_weight"] * pr_loss
                         + self.exp_params["conext_loss_weight"] * conext_loss
                         + self.exp_params["class_loss_weight"]*loss_dict['class_loss']
+                        + self.exp_params["HUV_loss_weight"]*huv_loss
                     )
 
                 # ========== 反向传播 + 优化（AMP适配） ==========
@@ -3575,15 +3595,35 @@ class MM3DAdv_ATTACK:
                 if self.exp_params["optim_object_type"] != 0:
                     self.optim.adv_init_tensor.data = torch.clamp(self.optim.adv_init_tensor.data, 0.0, 1.0)
 
+                temp_dict=count_false_positive_single_model(model_result= result_object_adv_com,
+                                                            ref_result=result_object_origin_only_object_gt,
+                                                            iou_threshold= 0.5,# self.detect_params['iou_threshold'],
+                                                            conf_threshold=0.5 )#self.detect_params['conf_threshold'])
+                # print(temp_dict)
+                epoch_total_fp += temp_dict["avg_false_pos_prob"]
+                epoch_batch_count += sum(temp_dict['false_pos_counts'])
+                step+=1
 
+            if epoch_batch_count > 0:
+                avg_fp_epoch = epoch_batch_count / step
+                print(f"\n Epoch [{epoch+1}] 平均误识别率: {avg_fp_epoch:.4f}")
+                epoch_false_pos_rates.append(avg_fp_epoch)
 
-
+        # 保存 texture。
+        save_tensor_root=os.path.join(self.exp_params["experiment_path"],"texture")
+        os.makedirs(save_tensor_root,exist_ok=True)
+        save_tensor_path=os.path.join(save_tensor_root,"texture.pt") 
+        torch.save(adv_tensor_generate, save_tensor_path)
         ref_result_dict=self.detect_val(
-            input_image=origin_com_tensor_rendered_sized,
-            input_path='./exp',
+            input_image=adv_com_tensor_rendered_sized,
+            input_path=['./exp/visual_val']*self.exp_params["batch_size"],
             input_file_name='origin_example'
         )
-        print(ref_result_dict)
+        
+
+   
+
+
 
    
 
@@ -3602,7 +3642,7 @@ class MM3DAdv_ATTACK:
         """
 
 
-        cam_target=[self.exp_params["cam_target_class"]]*self.exp_params["batch_size"]
+        cam_target=[self.exp_params["cam_target_class"]]*self.exp_params["render_face_size"]
         controlnet_adv_texture=self.init_tex_generate(
                                     control_image=control_image,
                                 cam_target_class=cam_target,
@@ -3611,7 +3651,7 @@ class MM3DAdv_ATTACK:
 
 
 
-        tensor2picture(controlnet_adv_texture[0],"./debug_results/controlnet_sample.jpg") 
+        tensor2picture(controlnet_adv_texture[0],"./exp/debug_results/controlnet_sample.jpg") 
 
 
         self.optim_prepare(ini_texture=controlnet_adv_texture)

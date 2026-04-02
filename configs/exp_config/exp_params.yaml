@@ -8,8 +8,8 @@ render_size:
   height: 720
 device: "cuda"  
 # optim params
-optim_epochs: 5
-lr: 0.05     #0.05   # 默认0.5
+optim_epochs: 10
+lr: 0.5     #0.05   # 默认0.5
 lr_step: 40 # 10
 lr_decay: 0.8
 
@@ -30,17 +30,16 @@ optim_object_type: 0
 # 1 表示直接优化RGB图片
 # 2 表示经过VAE，优化RGB图像
 cam_target_class : "camouflage dog"
-target_class: 16 # 目标类别，参考COCO类别对应
-target_class_ref: 0 # 目标类别，参考COCO类别对应,
+target_class: 2 # 目标类别，参考COCO类别对应,参考类别
 
 
 
 
 TV_loss_weight: 0.1
-conext_loss_weight: 0.1 ## 默认 1：1000 默认2：2000
-perceptual_loss_weight: 0 ## 默认1： 1000 默认2：1000
+conext_loss_weight: 1 ## 默认 1：1000 默认2：2000
+perceptual_loss_weight: 0.01 ## 默认1： 1000 默认2：1000
 class_loss_weight : 1  # 1  
-HUV_loss_weight : 0.8
+HUV_loss_weight : 5
 
 experiment_path: "exp/260112_optim_test/"
 train_root_dir : "/root/autodl-fs/data/tesla_model3/location_000"
@@ -51,5 +50,7 @@ num_workers: 4
 
 mesh_model_path: "/root/autodl-fs/data/object_model/byd_yangwang_u9_whole.obj"
 
+render_face_size : 1
 target_material_dict :
   - "body"
+  # - "MAT_Tire_Hub.001"

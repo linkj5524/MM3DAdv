@@ -18,6 +18,90 @@ from typing import Optional, Any,Tuple, Dict, List,Union
 from contextlib import suppress
 import pytorch_lightning as pl
 import yaml
+from torchvision.ops import box_iou
+
+def mask_to_gt_dict(
+    mask_tensor: torch.Tensor,
+    label: int = 2,
+    num_classes: int = 80,
+    device: str = "cuda",
+    threshold: float = 1e-6
+):
+    """
+    将 mask 转为 GT 字典，支持 batch
+
+    Args:
+        mask_tensor: [B, 1, H, W] 或 [B, H, W], bool 或 float
+        label: GT类别索引
+        num_classes: 类别总数
+        device: 返回tensor的设备
+        threshold: mask判定阈值
+
+    Returns:
+        dict 与 YOLO decode 输出一致：
+        {
+            'boxes': list[Tensor[M,4]],
+            'scores': list[Tensor[M]],
+            'labels': list[Tensor[M]],
+            'scores_vector': list[Tensor[M,num_classes]]
+        }
+    """
+    # =========================
+    # 标准化形状 [B, H, W]
+    # =========================
+    if mask_tensor.ndim == 4 and mask_tensor.shape[1] == 1:
+        mask_tensor = mask_tensor[:, 0, :, :]
+    elif mask_tensor.ndim != 3:
+        raise ValueError(f"mask_tensor should be [B,1,H,W] or [B,H,W], got {mask_tensor.shape}")
+
+    B, H, W = mask_tensor.shape
+
+    boxes_all = []
+    scores_all = []
+    labels_all = []
+    scores_vector_all = []
+
+    for b in range(B):
+        mask = mask_tensor[b] > threshold  # bool mask
+
+        coords = torch.nonzero(mask)  # [N,2] y,x
+
+        if coords.shape[0] == 0:
+            # 空mask
+            boxes_all.append(torch.zeros((0, 4), device=device))
+            scores_all.append(torch.zeros((0,), device=device))
+            labels_all.append(torch.zeros((0,), dtype=torch.long, device=device))
+            scores_vector_all.append(torch.zeros((0, num_classes), device=device))
+            continue
+
+        y_min = coords[:, 0].min()
+        y_max = coords[:, 0].max()
+        x_min = coords[:, 1].min()
+        x_max = coords[:, 1].max()
+
+        # 构造bbox
+        box = torch.tensor([x_min, y_min, x_max, y_max], dtype=torch.float32, device=device).unsqueeze(0)
+        score = torch.tensor([1.0], device=device)
+        label_tensor = torch.tensor([label], device=device)
+
+        # one-hot vector
+        score_vec = torch.zeros((1, num_classes), device=device)
+        score_vec[0, label] = 1.0
+
+        boxes_all.append(box)
+        scores_all.append(score)
+        labels_all.append(label_tensor)
+        scores_vector_all.append(score_vec)
+
+    results = {
+        'boxes': boxes_all,
+        'scores': scores_all,
+        'labels': labels_all,
+        'scores_vector': scores_vector_all
+    }
+
+    return results
+
 # 纯PyTorch实现的匈牙利算法（无改动，确保不依赖外部库）
 # def hungarian_matching(cost_matrix):
 #     """
@@ -3809,6 +3893,192 @@ def build_RGBCameraPose_dataloader(
     
 #     return resized_tensor
 
+
+# def count_false_positive_single_model(
+#     model_result: dict,
+#     ref_result: dict,
+#     iou_threshold: float = 0.5,
+#     conf_threshold: float = 0.5
+# ) -> dict:
+#     """
+#     单个模型版本：计算每个batch的误识别框数量 & 平均误识别概率
+
+#     误识别定义：置信度达标，但 类别错误 或 IoU不达标 或 参考无框却检出框
+
+#     返回：
+#         {
+#             "false_pos_counts": [0, 2, 1, 0, ...],  # 每个batch误识别框数量
+#             "avg_false_pos_prob": 0.xx              # 平均每个batch误识别概率
+#         }
+#     """
+#     required_keys = ['boxes', 'scores', 'labels']
+#     for key in required_keys:
+#         if key not in ref_result or key not in model_result:
+#             raise ValueError(f"缺少关键字段：{key}")
+
+#     ref_batch_num = len(ref_result['labels'])
+#     model_batch_num = len(model_result['labels'])
+
+#     if ref_batch_num != model_batch_num:
+#         return {
+#             "false_pos_counts": [0] * ref_batch_num,
+#             "avg_false_pos_prob": 0.0
+#         }
+
+#     # 提取参考batch的目标框
+#     ref_batch_features = []
+#     for batch_idx in range(ref_batch_num):
+#         if len(ref_result['labels'][batch_idx]) == 0 or len(ref_result['boxes'][batch_idx]) == 0:
+#             ref_batch_features.append(None)
+#             continue
+
+#         ref_box = ref_result['boxes'][batch_idx][0]
+#         ref_label = ref_result['labels'][batch_idx][0]
+#         ref_batch_features.append({
+#             'box': ref_box,
+#             'label': ref_label
+#         })
+
+#     false_pos_counts = []
+
+#     # 遍历每个batch，计算误识别
+#     for batch_idx in range(ref_batch_num):
+#         ref_feat = ref_batch_features[batch_idx]
+
+#         curr_labels = model_result['labels'][batch_idx]
+#         curr_boxes = model_result['boxes'][batch_idx]
+#         curr_scores = model_result['scores'][batch_idx]
+
+#         false_pos = 0
+
+#         for box_idx in range(len(curr_labels)):
+#             c_score = curr_scores[box_idx]
+#             if c_score < conf_threshold:
+#                 continue  # 只统计置信度达标的框
+
+#             c_label = curr_labels[box_idx]
+#             c_box = curr_boxes[box_idx]
+
+#             # ====== 误识别规则 ======
+#             if ref_feat is None:
+#                 # 参考无框 → 检出就算误识别
+#                 false_pos += 1
+#             else:
+#                 # 类别不匹配 或 IoU不匹配 → 误识别
+#                 label_match = torch.equal(c_label, ref_feat['label']) if torch.is_tensor(c_label) else (c_label == ref_feat['label'])
+#                 iou_match = calculate_box_iou(c_box, ref_feat['box']) >= iou_threshold
+
+#                 if not label_match or not iou_match:
+#                     false_pos += 1
+
+#         false_pos_counts.append(false_pos)
+
+#     # 平均误识别概率 = 总误识别数 / 总batch数
+#     total_batches = len(false_pos_counts)
+#     total_false_pos = sum(false_pos_counts)
+#     avg_false_pos_prob = round(total_false_pos / total_batches, 4) if total_batches > 0 else 0.0
+
+#     return {
+#         "false_pos_counts": false_pos_counts,
+#         "avg_false_pos_prob": avg_false_pos_prob
+#     }
+
+
+
+
+def count_false_positive_single_model(
+    model_result: dict,
+    ref_result: dict,
+    iou_threshold: float = 0.5,
+    conf_threshold: float = 0.5
+) -> dict:
+    """
+    标准检测匹配逻辑：
+    - 每个 GT 最多匹配一个预测框
+    - 预测框按置信度从高到低匹配
+    - 满足：conf ≥ threshold + IOU ≥ threshold + 类别相同 = 成功匹配（TP）
+    - 统计：成功匹配的 GT 数量
+    返回格式保持不变
+    """
+    from torchvision.ops import box_iou
+
+    required_keys = ['boxes', 'scores', 'labels']
+    for key in required_keys:
+        if key not in ref_result or key not in model_result:
+            raise ValueError(f"缺少关键字段：{key}")
+
+    batch_size = len(ref_result['labels'])
+    false_pos_counts = []
+    total_fp = 0
+
+    for b in range(batch_size):
+        gt_boxes = ref_result['boxes'][b]
+        gt_labels = ref_result['labels'][b]
+
+        pred_boxes = model_result['boxes'][b]
+        pred_labels = model_result['labels'][b]
+        pred_scores = model_result['scores'][b]
+
+        num_gt = len(gt_boxes)
+        num_pred = len(pred_boxes)
+
+        # 没有 GT
+        if num_gt == 0:
+            false_pos_counts.append(0)
+            continue
+
+        # 过滤低置信度框
+        keep = pred_scores >= conf_threshold
+        pred_boxes = pred_boxes[keep]
+        pred_labels = pred_labels[keep]
+        pred_scores = pred_scores[keep]
+
+        # 按置信度从高到低排序
+        order = pred_scores.argsort(descending=True)
+        pred_boxes = pred_boxes[order]
+        pred_labels = pred_labels[order]
+
+        # 计算 IoU
+        iou_matrix = box_iou(pred_boxes, gt_boxes)  # [N_pred, N_gt]
+
+        # 记录已匹配的 GT
+        matched_gt = torch.zeros(num_gt, dtype=torch.bool, device=gt_boxes.device)
+        tp_count = 0
+
+        # 高分优先匹配
+        for i in range(len(pred_boxes)):
+            p_lbl = pred_labels[i]
+
+            # 找到当前预测框最匹配的 GT
+            iou_values = iou_matrix[i]
+            best_iou, best_gt_idx = torch.max(iou_values, dim=0)
+
+            best_iou = best_iou.item()
+            best_gt_idx = best_gt_idx.item()
+
+            g_lbl = gt_labels[best_gt_idx]
+
+            # 类别是否相同
+            label_match = torch.equal(p_lbl, g_lbl) if torch.is_tensor(p_lbl) else (p_lbl == g_lbl)
+
+            # 判断是否满足所有条件
+            if (best_iou >= iou_threshold) and label_match and not matched_gt[best_gt_idx]:
+                matched_gt[best_gt_idx] = True
+                tp_count += 1
+
+        # 未被匹配到的 GT 数量 = 总GT - 成功匹配的GT
+        fn_count = num_gt - tp_count
+        false_pos_counts.append(fn_count)
+        total_fp += fn_count
+
+    avg_false_pos_prob = round(total_fp / batch_size, 4) if batch_size > 0 else 0.0
+
+    return {
+        "false_pos_counts": false_pos_counts,
+        "avg_false_pos_prob": avg_false_pos_prob
+    }
+
+    
 def resize_tensor_ratio_pad(tensor: torch.Tensor, height: int, width: int, fill: float = 0.0):
     """
     保留原有参数名，等比例缩放 + 居中 + 黑色填充
@@ -3890,6 +4160,8 @@ def resize_tensor(adv_tensor_generate, height, width, mode='bilinear', align_cor
     return resized_tensor
 
 
+
+# 统计误识别个数
 
 
 

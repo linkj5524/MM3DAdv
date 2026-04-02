@@ -57,7 +57,8 @@ def visualize_and_save_render(
         # 保存图像（自动将[0,1]的float转为[0,255]的uint8）
         save_path = os.path.join(save_dir, f"render_obj_{i}.png")
         plt.imsave(save_path, single_img)
-        print(f"渲染结果已保存至：{save_path}")
+        plt.close('all')  
+        # print(f"渲染结果已保存至：{save_path}")
 
 
 
@@ -878,10 +879,10 @@ def compose_with_background(
     # ================= 融合 =================
     output = torch.where(mask, rgb, background)
 
-    return output
+    return output,mask
 
 def load_parma_and_render_main(
-    object_mesh,   # ✅ List[Meshes]
+    object_mesh,   #  List[Meshes]
     background,
     path_camera_pose,
     image_size,
@@ -922,13 +923,13 @@ def load_parma_and_render_main(
         device=device
     )
 
-    rendered_image_tensor=compose_with_background(image_tensor,images_depth,background)
+    rendered_image_tensor,mask=compose_with_background(image_tensor,images_depth,background)
 
     # ================= debug =================
-    visualize_and_save_render(image_tensor)
-    visualize_and_save_render(rendered_image_tensor, save_dir="debug_results/1")
+    visualize_and_save_render(image_tensor,save_dir="./exp/debug_results/2")
+    visualize_and_save_render(rendered_image_tensor, save_dir="./exp/debug_results/1")
 
-    return rendered_image_tensor
+    return rendered_image_tensor,mask
 
 
 

@@ -2,7 +2,7 @@
 conf_threshold: 0.25             
 iou_threshold: 0.1
 nclass_yaml_path: "./configs/other_config/coco_class.yaml"
-
+nums_class : 80 
 val_model1:
   val_model1:
     model_path: "/root/autodl-fs/models_controlnet_adv/yolov8m.pt"

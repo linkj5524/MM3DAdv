@@ -428,7 +428,7 @@ class ObjectDetection:
             # 生成多batch保存路径
             if save_path is not None:
                 # 拆分路径和后缀
-
+                os.makedirs(save_path[b],exist_ok=True)
                 batch_save_path = os.path.join(save_path[b], file_name)
                 
                 # 保存图像
