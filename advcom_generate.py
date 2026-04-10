@@ -298,6 +298,7 @@ if __name__ == '__main__':
     imgsize_width=attack.exp_params["image_size"]
 
     img = cv2.imread(r'./test_imgs/texture.jpg')  # BGR 格式 (H, W, 3)
+    # img=cv2.imread(r"./test_imgs/dog.png")
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # 转为 RGB
     
     # 2. 调用 Canny 函数
@@ -305,8 +306,8 @@ if __name__ == '__main__':
         input_image=img,
         image_resolution=512,
         num_samples=1,
-        low_threshold=100,
-        high_threshold=200
+        low_threshold=150,
+        high_threshold=240
     )
 
     # canny_tensor = get_contour_tensor(

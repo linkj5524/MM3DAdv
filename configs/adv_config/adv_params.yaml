@@ -3,7 +3,7 @@
 
 # ADV_ATTACK的默认参数（新增）
 
-prompt: "urban camouflage texture, city camouflage, building facade pattern, concrete and metal texture, urban color palette, realistic physical surface, neutral gray tone, compatible with city street background, natural material noise, subtle structural lines, non-reflective matte surface, high fidelity physical details"
+prompt: "urban camouflage texture, city camouflage, building facade pattern, concrete and metal texture"
 n_prompt: ". blurry, low resolution, ugly, deformed, noisy texture, pixelated, unrealistic, bad detail, distorted pattern, edge mismatch, pattern fragmentation, over-saturated colors, glossy surface, cartoonish, 3d render artifacts, extra edges, missing edges"
 ddim_steps: 30
 guess_mode: false

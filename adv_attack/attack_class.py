@@ -3466,15 +3466,19 @@ class MM3DAdv_ATTACK:
                                                                     blur_radius=0.0,
                                                                     faces_per_pixel=1)
                     ## 纹理贴图渲染
-                    if len(self.optim.target_material) == len(adv_tensor_generate):
+                    if self.optim.target_material is None or  len(self.optim.target_material) != len(adv_tensor_generate)   :
+
+
+                        # 如果不对应，默认全部渲染
+                        adv_tex = adv_tensor_generate[0] if adv_tensor_generate.ndim == 4 else adv_tensor_generate
+                        target_index_dict = {mat: adv_tex for mat in self.optim.material_list}
+
+                    else:
+                        
                         target_index_dict = {}
                         for mat, tex in zip(self.optim.target_material, adv_tensor_generate):
                             target_index_dict[mat] = tex
-                    else:
-                        #  修复：加 .detach() 保持梯度流
 
-                        adv_tex = adv_tensor_generate[0] if adv_tensor_generate.ndim == 4 else adv_tensor_generate
-                        target_index_dict = {mat: adv_tex for mat in self.optim.target_material}
 
                     new_mesh_rendered_adv_com=update_meshes_texture_dict(
                         original_meshes_list=self.optim.mesh_model,
@@ -3641,17 +3645,22 @@ class MM3DAdv_ATTACK:
             ====================================================
         """
 
-
-        cam_target=[self.exp_params["cam_target_class"]]*self.exp_params["render_face_size"]
+        render_size=self.exp_params['render_face_size']
+        # tensor 扩展
+        if control_image.dim()==3:
+            control_image=control_image.unsqueeze(0)
+        if control_image.shape[0] != render_size:
+            control_image=control_image.expand(render_size,-1,-1,-1) # 扩展到 [render_size, C, H, W]
+        # cam_target=[self.exp_params["cam_target_class"]]*self.exp_params["render_face_size"]
         controlnet_adv_texture=self.init_tex_generate(
                                     control_image=control_image,
-                                cam_target_class=cam_target,
+                                cam_target_class=None,
                                 ref_class=None, # object_class
                                 negtive_class='car')
 
 
 
-        tensor2picture(controlnet_adv_texture[0],"./exp/debug_results/controlnet_sample.jpg") 
+        tensor2picture(controlnet_adv_texture[0],"./exp/visualization/controlnet_sample.jpg") 
 
 
         self.optim_prepare(ini_texture=controlnet_adv_texture)

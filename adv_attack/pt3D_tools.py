@@ -526,7 +526,7 @@ def generate_camera_from_params(
         R=R_batch,                  # 批量旋转矩阵 (B, 3, 3)
         T=T_batch,                  # 批量平移向量 (B, 3)
         fov=fov,                    # 所有相机共用的视场角
-        # aspect_ratio=img_size[0]/img_size[1],  # 宽高比
+        # aspect_ratio=img_size[1]/img_size[0],  # 宽高比
         # 显式设置图像尺寸，确保和渲染配置匹配
         
     )

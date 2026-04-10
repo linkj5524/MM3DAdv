@@ -9,12 +9,12 @@ render_size:
 device: "cuda"  
 # optim params
 optim_epochs: 10
-lr: 0.05     #0.05   
-lr_step: 2 # 10
+lr: 0.001     #0.05   # 默认0.5
+lr_step: 40 # 10
 lr_decay: 0.8
 
 
- 
+
 # amp_status: true 
 use_amp : false
 use_bf16 : true 
@@ -41,9 +41,10 @@ perceptual_loss_weight: 0.01 ## 默认1： 1000 默认2：1000
 class_loss_weight : 1  # 1  
 HUV_loss_weight : 5
 
-experiment_path: "exp/260112_optim_test/"
-train_root_dir : "/root/autodl-fs/MM3DAdv_data/env_data/carla_sample_data20260316/vehicle_tesla_model3/location_000"
-val_root_dir : "/root/autodl-fs/MM3DAdv_data/env_data/carla_sample_data20260316/vehicle_tesla_model3/location_000_random"
+experiment_path: "exp/260112_optim_test/" 
+# 较近距离，4m
+train_root_dir : "/root/autodl-fs/MM3DAdv_data/env_data/carla_sample_data20260316_real_4m/vehicle_tesla_model3/location_000"
+val_root_dir : "/root/autodl-fs/MM3DAdv_data/env_data/carla_sample_data20260316_real_4m/vehicle_tesla_model3/location_000_random"
 
 batch_size: 1
 num_workers: 4
