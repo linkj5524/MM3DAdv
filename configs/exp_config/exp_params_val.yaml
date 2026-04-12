@@ -8,7 +8,7 @@ render_size:
   height: 720
 device: "cuda"  
 # optim params
-optim_epochs: 10
+optim_epochs: 2
 lr: 0.05     #0.05   
 lr_step: 10 # 10  ,按迭代次数算
 lr_decay: 0.8
@@ -41,31 +41,21 @@ perceptual_loss_weight: 0.01 ## 默认1： 1000 默认2：1000
 class_loss_weight : 1  # 1  
 HUV_loss_weight : 5
 
-experiment_path: "exp/train_20260411_4m/yolov8"
+experiment_path: "exp/260112_optim_val/"
+# train_root_dir : "/root/autodl-fs/MM3DAdv_data/env_data/carla_sample_data20260316/vehicle_tesla_model3/location_000"
+# val_root_dir : "/root/autodl-fs/MM3DAdv_data/env_data/carla_sample_data20260316/vehicle_tesla_model3/location_000_random"
+
+iou_threshold_val: 0.5
+conf_threshold_val: 0.05
 
 
-# dataloader:
-#   target: adv_attack.util.build_RGBCameraPose_dataloader
-
-#   params:
-#     train_root_dir: "/root/autodl-fs/MM3DAdv_data/env_data/carla_sample_data20260316/vehicle_tesla_model3/location_000"
-#     val_root_dir: "/root/autodl-fs/MM3DAdv_data/env_data/carla_sample_data20260316/vehicle_tesla_model3/location_000_random"
-
-#     transform:
-#       target: torchvision.transforms.Compose
-#       params:
-#         transforms:
-
-#           - target: torchvision.transforms.ToTensor
 
 dataloader:
   target: adv_attack.util.build_RGBCameraPose_dataloader_single_path
 
   params:
-    root_dir: "/root/autodl-fs/data_debug/carla_sample_data20260411_final/vehicle_audi_tt"
-    
-    # "/root/autodl-fs/MM3DAdv_data/env_data/carla_sample_data20260316/vehicle_tesla_model3"
-# /root/autodl-fs/MM3DAdv_data/env_data/carla_sample_data20260316_real_4m
+    root_dir: "/root/autodl-fs/MM3DAdv_data/env_data/carla_sample_data20260316/vehicle_tesla_model3"
+
 
     transform:
       target: torchvision.transforms.Compose
@@ -78,10 +68,7 @@ dataloader:
 batch_size: 1
 num_workers: 4
 
-texture_save_interval: 100
-
-
-mesh_model_path: "/root/autodl-fs/MM3DAdv_data/3Dmodel/mazda/mazda_partV1.obj"
+mesh_model_path: "/root/autodl-fs/MM3DAdv_data/3Dmodel/mazda/mazda_part.obj"
 
 render_face_size : 2  # 面个数
 target_material_dict :

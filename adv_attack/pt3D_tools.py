@@ -1,3 +1,5 @@
+import math
+
 import torch
 import matplotlib.pyplot as plt
 from pytorch3d.io import load_objs_as_meshes
@@ -350,124 +352,532 @@ def load_obj_model(obj_path: str, device: torch.device):
         )
         meshes_list.append(mesh)
 
+
+
+    print("\n" + "="*60)
+    print("📦 模型尺寸 & 原点信息")
+    print("="*60)
+
+    # 1. 顶点范围
+    v_min = verts.min(dim=0)[0]
+    v_max = verts.max(dim=0)[0]
+    print(f"顶点最小坐标 (min): {v_min.tolist()}")
+    print(f"顶点最大坐标 (max): {v_max.tolist()}")
+
+    # 2. 模型尺寸 (width, height, depth)
+    size = v_max - v_min
+    print(f"模型尺寸 X(宽): {size[0]:.3f}")
+    print(f"模型尺寸 Y(深): {size[1]:.3f}")
+    print(f"模型尺寸 Z(高): {size[2]:.3f}")
+
+    # 3. 模型几何中心
+    center = (v_min + v_max) / 2
+    print(f"模型几何中心: {center.tolist()}")
+
+    # 4. 模型底面中心（你CARLA对齐用的地面点）
+    bottom_center = torch.tensor([
+        center[0],
+        center[1],
+        v_min[2]  # Z取最低 = 地面
+    ], device=device)
+    print(f"模型底面中心点 (地面接触点): {bottom_center.tolist()}")
+
+    # 5. 当前模型原点（就是OBJ导出时的原点：(0,0,0) 在模型中的位置）
+    print(f"OBJ文件原点 (0,0,0) 相对于模型的位置: [0, 0, 0]")
+    print("⚠️  说明：PyTorch3D加载后的原点 = Blender里设置的原点")
+    print("="*60 + "\n")
+
     print(f"共生成 {len(meshes_list)} 个子 Mesh (材质分割)")
+
     return meshes_list
 
+# def load_obj_model_return_mesh_material(obj_path: str, device: torch.device):
+#     """
+#     加载 OBJ 并按材质渲染：
+#     - 有贴图 → 使用 UV 纹理
+#     - 无贴图 → 使用材料颜色创建纯色UV纹理（修复维度匹配问题）
+#     """
+#     print(f"Loading OBJ: {obj_path}")
+
+#     verts, faces, aux = load_obj(obj_path, load_textures=True)
+#     verts = verts.to(device)
+#     faces_idx = faces.verts_idx.to(device)
+
+#     has_uv = aux.verts_uvs is not None and faces.textures_idx is not None and len(aux.verts_uvs) > 0
+#     print("OBJ检测:")
+#     print("verts_uvs:", None if aux.verts_uvs is None else aux.verts_uvs.shape)
+#     print("faces_uvs:", None if faces.textures_idx is None else faces.textures_idx.shape)
+#     print("texture_images:", aux.texture_images)
+#     print("materials:", list(aux.material_colors.keys()) if aux.material_colors else None)
+
+#     # faces.materials_idx 对应的整数索引，需要映射到 aux.material_colors
+#     material_names = list(aux.material_colors.keys()) if aux.material_colors else []
+
+#     meshes_list = []
+#     material_names_list = []
+
+#     for mat_idx in faces.materials_idx.unique().tolist():
+#         # 对应材质名字
+#         mat_name = material_names[mat_idx] if mat_idx < len(material_names) else None
+
+#         # 找到使用这个材质的面
+#         face_mask = (faces.materials_idx == mat_idx)
+#         face_indices = face_mask.nonzero(as_tuple=True)[0]
+        
+#         # 提取当前材质对应的面和UV索引（核心修复：仅保留当前材质的索引）
+#         current_faces_idx = faces_idx[face_indices]  # 当前材质的面索引
+#         current_faces_uvs = faces.textures_idx[face_indices].to(device) if has_uv else None
+#         current_verts_uvs = aux.verts_uvs.to(device) if has_uv else None
+
+#         # 是否有纹理图片
+#         if has_uv and aux.texture_images is not None and mat_name in aux.texture_images:
+#             # 有纹理图：使用当前材质的UV索引
+#             tex_img = aux.texture_images[mat_name].to(device).permute(2, 0, 1).unsqueeze(0).float() / 255.0
+#             texture_image = tex_img.permute(0, 2, 3, 1).contiguous()
+#             tex = TexturesUV(
+#                 maps=texture_image,
+#                 faces_uvs=current_faces_uvs[None],  # 仅当前材质的面UV索引
+#                 verts_uvs=current_verts_uvs[None]    # 全局UV（但索引仅指向当前材质的面）
+#             )
+#         # 无纹理图片但有UV → 创建纯色UV纹理
+#         elif has_uv:
+#             # 获取材质漫反射颜色
+#             try:
+#                 diffuse_color = aux.material_colors[mat_name]["diffuse_color"]
+#                 if isinstance(diffuse_color, torch.Tensor):
+#                     color = diffuse_color.to(device=device, dtype=torch.float32).detach()
+#                 else:
+#                     # 处理颜色是列表/数组的情况，确保维度为3
+#                     color = torch.tensor(diffuse_color, device=device, dtype=torch.float32)
+#                     if color.ndim == 2:  # 修复颜色维度异常（如[[r,g,b],[r,g,b]]）
+#                         color = color[0]
+#             except (KeyError, TypeError, IndexError):
+#                 color = torch.tensor([0.7, 0.7, 0.7], device=device)  # 默认灰色
+        
+#             # 确保颜色是1维张量（RGB）
+#             color = color.squeeze()
+#             if color.numel() != 3:
+#                 color = torch.tensor([0.7, 0.7, 0.7], device=device)
+        
+#             # 创建纯色UV纹理图（512x512，适配UV映射）
+#             texture_image = color.expand(1, 512, 512, 3).contiguous()
+            
+#             # 用纯色纹理创建UV纹理（使用当前材质的UV索引）
+#             tex = TexturesUV(
+#                 maps=texture_image,
+#                 faces_uvs=current_faces_uvs[None],  # 核心：仅当前材质的面UV索引
+#                 verts_uvs=current_verts_uvs[None]
+#             )
+#         # 无UV也无纹理 → 降级使用顶点颜色
+#         else:
+#             try:
+#                 diffuse_color = aux.material_colors[mat_name]["diffuse_color"]
+#                 if isinstance(diffuse_color, torch.Tensor):
+#                     color = diffuse_color.to(device=device, dtype=torch.float32).detach()
+#                 else:
+#                     color = torch.tensor(diffuse_color, device=device, dtype=torch.float32)
+#                     if color.ndim == 2:
+#                         color = color[0]
+#             except (KeyError, TypeError, IndexError):
+#                 color = torch.tensor([0.7, 0.7, 0.7], device=device)
+
+#             color = color.squeeze()
+#             if color.numel() != 3:
+#                 color = torch.tensor([0.7, 0.7, 0.7], device=device)
+
+#             verts_color = color.expand(len(verts), 3)
+#             tex = TexturesVertex(verts_features=verts_color[None])
+        
+#         # 创建当前材质的Mesh（使用当前材质的面索引）
+#         mesh = Meshes(
+#             verts=[verts],  # 全局顶点（OBJ的所有顶点）
+#             faces=[current_faces_idx],  # 仅当前材质的面
+#             textures=tex
+#         )
+#         meshes_list.append(mesh)
+#         material_names_list.append(mat_name)
+
+#     print(f"共生成 {len(meshes_list)} 个子 Mesh (材质分割)")
+#     return meshes_list,material_names_list
+
+# def load_obj_model_return_mesh_material(obj_path: str, device: torch.device):
+#     """
+#     加载 OBJ 并按材质渲染：
+#     - 有贴图 → 使用 UV 纹理
+#     - 无贴图 → 使用材料颜色创建纯色UV纹理
+#     内置透明度 d 处理，保持 RGB 3通道，兼容原有 Shader
+#     """
+#     print(f"Loading OBJ: {obj_path}")
+
+#     verts, faces, aux = load_obj(obj_path, load_textures=True)
+#     verts = verts.to(device)
+#     faces_idx = faces.verts_idx.to(device)
+
+#     has_uv = aux.verts_uvs is not None and faces.textures_idx is not None and len(aux.verts_uvs) > 0
+#     print("OBJ检测:")
+#     print("verts_uvs:", None if aux.verts_uvs is None else aux.verts_uvs.shape)
+#     print("faces_uvs:", None if faces.textures_idx is None else faces.textures_idx.shape)
+#     print("texture_images:", aux.texture_images)
+#     print("materials:", list(aux.material_colors.keys()) if aux.material_colors else None)
+
+#     material_names = list(aux.material_colors.keys()) if aux.material_colors else []
+
+#     # 解析 mtl 获取透明度 d
+#     def parse_mtl_alpha(mtl_path):
+#         mat_alpha = {}
+#         current_mat = None
+#         if not os.path.exists(mtl_path):
+#             return mat_alpha
+#         with open(mtl_path, 'r', encoding='utf-8', errors='ignore') as f:
+#             for line in f:
+#                 line = line.strip()
+#                 if not line:
+#                     continue
+#                 parts = line.split()
+#                 if parts[0] == 'newmtl':
+#                     current_mat = parts[1]
+#                     mat_alpha[current_mat] = 1.0
+#                 elif parts[0] == 'd' and current_mat:
+#                     try:
+#                         mat_alpha[current_mat] = float(parts[1])
+#                     except:
+#                         mat_alpha[current_mat] = 1.0
+#         return mat_alpha
+
+#     obj_dir = os.path.dirname(obj_path)
+#     mtl_path = os.path.splitext(obj_path)[0] + ".mtl"
+#     mat_alpha = parse_mtl_alpha(mtl_path)
+
+#     meshes_list = []
+#     material_names_list = []
+
+#     for mat_idx in faces.materials_idx.unique().tolist():
+#         mat_name = material_names[mat_idx] if mat_idx < len(material_names) else None
+#         face_mask = (faces.materials_idx == mat_idx)
+#         face_indices = face_mask.nonzero(as_tuple=True)[0]
+
+#         current_faces_idx = faces_idx[face_indices]
+#         current_faces_uvs = faces.textures_idx[face_indices].to(device) if has_uv else None
+#         current_verts_uvs = aux.verts_uvs.to(device) if has_uv else None
+
+#         # 读取当前材质透明度
+#         alpha = mat_alpha.get(mat_name, 1.0)
+
+#         texture_image = None
+#         tex = None
+
+#         # ==============================================
+#         # 有纹理图：加载后直接乘以透明度（保持 RGB 3 通道）
+#         # ==============================================
+#         if has_uv and aux.texture_images is not None and mat_name in aux.texture_images:
+#             tex_img = aux.texture_images[mat_name].to(device).permute(2, 0, 1).unsqueeze(0).float() / 255.0
+#             texture_image = tex_img.permute(0, 2, 3, 1).contiguous()
+#             # 透明度直接乘到颜色上
+#             texture_image = texture_image * alpha
+
+#             tex = TexturesUV(
+#                 maps=texture_image,
+#                 faces_uvs=current_faces_uvs[None],
+#                 verts_uvs=current_verts_uvs[None]
+#             )
+
+#         # ==============================================
+#         # 无纹理有UV：纯色 * 透明度
+#         # ==============================================
+#         elif has_uv:
+#             try:
+#                 diffuse_color = aux.material_colors[mat_name]["diffuse_color"]
+#                 if isinstance(diffuse_color, torch.Tensor):
+#                     color = diffuse_color.to(device, torch.float32).detach()
+#                 else:
+#                     color = torch.tensor(diffuse_color, device=device, dtype=torch.float32)
+#                     if color.ndim == 2:
+#                         color = color[0]
+#             except (KeyError, TypeError, IndexError):
+#                 color = torch.tensor([0.7, 0.7, 0.7], device=device)
+
+#             color = color.squeeze()
+#             if color.numel() != 3:
+#                 color = torch.tensor([0.7, 0.7, 0.7], device=device)
+
+#             # 纯色 * 透明度
+#             color = color * alpha
+#             texture_image = color.expand(1, 512, 512, 3).contiguous()
+
+#             tex = TexturesUV(
+#                 maps=texture_image,
+#                 faces_uvs=current_faces_uvs[None],
+#                 verts_uvs=current_verts_uvs[None]
+#             )
+
+#         # ==============================================
+#         # 无UV：顶点色 * 透明度
+#         # ==============================================
+#         else:
+#             try:
+#                 diffuse_color = aux.material_colors[mat_name]["diffuse_color"]
+#                 if isinstance(diffuse_color, torch.Tensor):
+#                     color = diffuse_color.to(device, torch.float32).detach()
+#                 else:
+#                     color = torch.tensor(diffuse_color, device=device, dtype=torch.float32)
+#                     if color.ndim == 2:
+#                         color = color[0]
+#             except (KeyError, TypeError, IndexError):
+#                 color = torch.tensor([0.7, 0.7, 0.7], device=device)
+
+#             color = color.squeeze()
+#             if color.numel() != 3:
+#                 color = torch.tensor([0.7, 0.7, 0.7], device=device)
+
+#             # 颜色 * 透明度
+#             color = color * alpha
+#             verts_color = color.expand(len(verts), 3).contiguous()
+#             tex = TexturesVertex(verts_features=verts_color[None])
+
+#         # 构建 mesh
+#         mesh = Meshes(
+#             verts=[verts],
+#             faces=[current_faces_idx],
+#             textures=tex
+#         )
+#         meshes_list.append(mesh)
+#         material_names_list.append(mat_name)
+
+#     print(f"共生成 {len(meshes_list)} 个子 Mesh (材质分割)")
+#     return meshes_list, material_names_list
+
+def parse_mtl(mtl_path):
+    materials = {}
+    current_mat = None
+
+    if not os.path.exists(mtl_path):
+        return materials
+
+    with open(mtl_path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith("newmtl"):
+                current_mat = line.split()[1]
+                materials[current_mat] = {}
+            elif current_mat is None:
+                continue
+            else:
+                tokens = line.split()
+                if len(tokens) == 0:
+                    continue
+
+                key = tokens[0]
+
+                if key in ["map_Kd", "map_d"]:
+                    materials[current_mat][key] = tokens[-1]
+
+                elif key in ["d", "Tr"]:
+                    materials[current_mat]["alpha"] = float(tokens[1])
+
+    return materials
+
+
+# =========================
+# 2. texture + alpha bake
+# =========================
+def load_texture_baked_alpha(map_kd_path, map_d_path, alpha_scalar, device):
+    rgb = Image.open(map_kd_path).convert("RGB")
+    rgb = np.array(rgb).astype(np.float32) / 255.0
+
+    # alpha map
+    if map_d_path is not None and os.path.exists(map_d_path):
+        alpha = Image.open(map_d_path).convert("L")
+        alpha = np.array(alpha).astype(np.float32) / 255.0
+    else:
+        alpha = np.ones((rgb.shape[0], rgb.shape[1]), dtype=np.float32)
+
+    # scalar alpha（来自 d / Tr）
+    if alpha_scalar is not None:
+        alpha = alpha * alpha_scalar
+
+    # ===== bake =====
+    eps = 1e-6
+    rgb = rgb * alpha[..., None] + (1 - alpha[..., None]) * eps
+
+    tex = torch.from_numpy(rgb).to(device).unsqueeze(0)  # (1,H,W,3)
+    return tex
+
+
+# =========================
+# 3. 主函数
+# =========================
 def load_obj_model_return_mesh_material(obj_path: str, device: torch.device):
-    """
-    加载 OBJ 并按材质渲染：
-    - 有贴图 → 使用 UV 纹理
-    - 无贴图 → 使用材料颜色创建纯色UV纹理（修复维度匹配问题）
-    """
+
     print(f"Loading OBJ: {obj_path}")
 
     verts, faces, aux = load_obj(obj_path, load_textures=True)
+
     verts = verts.to(device)
     faces_idx = faces.verts_idx.to(device)
 
-    has_uv = aux.verts_uvs is not None and faces.textures_idx is not None and len(aux.verts_uvs) > 0
+    has_uv = (
+        aux.verts_uvs is not None
+        and faces.textures_idx is not None
+        and len(aux.verts_uvs) > 0
+    )
+
     print("OBJ检测:")
     print("verts_uvs:", None if aux.verts_uvs is None else aux.verts_uvs.shape)
     print("faces_uvs:", None if faces.textures_idx is None else faces.textures_idx.shape)
-    print("texture_images:", aux.texture_images)
     print("materials:", list(aux.material_colors.keys()) if aux.material_colors else None)
 
-    # faces.materials_idx 对应的整数索引，需要映射到 aux.material_colors
+    # ===== 解析 MTL =====
+    mtl_path = obj_path.replace(".obj", ".mtl")
+    mtl_data = parse_mtl(mtl_path)
+
     material_names = list(aux.material_colors.keys()) if aux.material_colors else []
 
     meshes_list = []
     material_names_list = []
 
     for mat_idx in faces.materials_idx.unique().tolist():
-        # 对应材质名字
+
         mat_name = material_names[mat_idx] if mat_idx < len(material_names) else None
 
-        # 找到使用这个材质的面
         face_mask = (faces.materials_idx == mat_idx)
         face_indices = face_mask.nonzero(as_tuple=True)[0]
-        
-        # 提取当前材质对应的面和UV索引（核心修复：仅保留当前材质的索引）
-        current_faces_idx = faces_idx[face_indices]  # 当前材质的面索引
-        current_faces_uvs = faces.textures_idx[face_indices].to(device) if has_uv else None
+
+        current_faces_idx = faces_idx[face_indices]
+
+        current_faces_uvs = (
+            faces.textures_idx[face_indices].to(device) if has_uv else None
+        )
+
         current_verts_uvs = aux.verts_uvs.to(device) if has_uv else None
 
-        # 是否有纹理图片
-        if has_uv and aux.texture_images is not None and mat_name in aux.texture_images:
-            # 有纹理图：使用当前材质的UV索引
-            tex_img = aux.texture_images[mat_name].to(device).permute(2, 0, 1).unsqueeze(0).float() / 255.0
-            texture_image = tex_img.permute(0, 2, 3, 1).contiguous()
-            tex = TexturesUV(
-                maps=texture_image,
-                faces_uvs=current_faces_uvs[None],  # 仅当前材质的面UV索引
-                verts_uvs=current_verts_uvs[None]    # 全局UV（但索引仅指向当前材质的面）
-            )
-        # 无纹理图片但有UV → 创建纯色UV纹理
-        elif has_uv:
-            # 获取材质漫反射颜色
-            try:
-                diffuse_color = aux.material_colors[mat_name]["diffuse_color"]
-                if isinstance(diffuse_color, torch.Tensor):
-                    color = diffuse_color.to(device=device, dtype=torch.float32).detach()
-                else:
-                    # 处理颜色是列表/数组的情况，确保维度为3
-                    color = torch.tensor(diffuse_color, device=device, dtype=torch.float32)
-                    if color.ndim == 2:  # 修复颜色维度异常（如[[r,g,b],[r,g,b]]）
-                        color = color[0]
-            except (KeyError, TypeError, IndexError):
-                color = torch.tensor([0.7, 0.7, 0.7], device=device)  # 默认灰色
-        
-            # 确保颜色是1维张量（RGB）
-            color = color.squeeze()
-            if color.numel() != 3:
-                color = torch.tensor([0.7, 0.7, 0.7], device=device)
-        
-            # 创建纯色UV纹理图（512x512，适配UV映射）
-            texture_image = color.expand(1, 512, 512, 3).contiguous()
-            
-            # 用纯色纹理创建UV纹理（使用当前材质的UV索引）
-            tex = TexturesUV(
-                maps=texture_image,
-                faces_uvs=current_faces_uvs[None],  # 核心：仅当前材质的面UV索引
-                verts_uvs=current_verts_uvs[None]
-            )
-        # 无UV也无纹理 → 降级使用顶点颜色
-        else:
-            try:
-                diffuse_color = aux.material_colors[mat_name]["diffuse_color"]
-                if isinstance(diffuse_color, torch.Tensor):
-                    color = diffuse_color.to(device=device, dtype=torch.float32).detach()
-                else:
+        # =========================
+        # 有 UV：优先走 texture
+        # =========================
+        if has_uv:
+
+            mtl_info = mtl_data.get(mat_name, {})
+
+            map_kd = mtl_info.get("map_Kd", None)
+            map_d = mtl_info.get("map_d", None)
+            alpha_scalar = mtl_info.get("alpha", 1.0)
+
+            if map_kd is not None:
+                map_kd = os.path.join(os.path.dirname(obj_path), map_kd)
+
+            if map_d is not None:
+                map_d = os.path.join(os.path.dirname(obj_path), map_d)
+
+            # ===== 有贴图 =====
+            if map_kd is not None and os.path.exists(map_kd):
+
+                texture_image = load_texture_baked_alpha(
+                    map_kd,
+                    map_d,
+                    alpha_scalar,
+                    device
+                )
+
+                tex = TexturesUV(
+                    maps=texture_image,
+                    faces_uvs=current_faces_uvs[None],
+                    verts_uvs=current_verts_uvs[None]
+                )
+
+            # ===== 无贴图：纯色 =====
+            else:
+                try:
+                    diffuse_color = aux.material_colors[mat_name]["diffuse_color"]
                     color = torch.tensor(diffuse_color, device=device, dtype=torch.float32)
                     if color.ndim == 2:
                         color = color[0]
-            except (KeyError, TypeError, IndexError):
+                except:
+                    color = torch.tensor([0.7, 0.7, 0.7], device=device)
+
+                color = color.clamp(0, 1)
+
+                # alpha 作用到颜色
+                color = color * alpha_scalar
+
+                texture_image = color.view(1, 1, 1, 3).expand(1, 512, 512, 3).contiguous()
+
+                tex = TexturesUV(
+                    maps=texture_image,
+                    faces_uvs=current_faces_uvs[None],
+                    verts_uvs=current_verts_uvs[None]
+                )
+
+        # =========================
+        # 无 UV：vertex color
+        # =========================
+        else:
+            try:
+                diffuse_color = aux.material_colors[mat_name]["diffuse_color"]
+                color = torch.tensor(diffuse_color, device=device, dtype=torch.float32)
+                if color.ndim == 2:
+                    color = color[0]
+            except:
                 color = torch.tensor([0.7, 0.7, 0.7], device=device)
 
-            color = color.squeeze()
-            if color.numel() != 3:
-                color = torch.tensor([0.7, 0.7, 0.7], device=device)
+            color = color.clamp(0, 1)
 
             verts_color = color.expand(len(verts), 3)
+
             tex = TexturesVertex(verts_features=verts_color[None])
-        
-        # 创建当前材质的Mesh（使用当前材质的面索引）
+
         mesh = Meshes(
-            verts=[verts],  # 全局顶点（OBJ的所有顶点）
-            faces=[current_faces_idx],  # 仅当前材质的面
+            verts=[verts],
+            faces=[current_faces_idx],
             textures=tex
         )
+
         meshes_list.append(mesh)
         material_names_list.append(mat_name)
 
-    print(f"共生成 {len(meshes_list)} 个子 Mesh (材质分割)")
-    return meshes_list,material_names_list
+###########################################################################
+    # ===================== 【自动计算：模型原点 + 大小】 =====================
+    ###########################################################################
+    print("\n" + "="*60)
+    print("📦 模型尺寸 & 原点信息")
+    print("="*60)
 
+    # 1. 顶点范围
+    v_min = verts.min(dim=0)[0]
+    v_max = verts.max(dim=0)[0]
+    print(f"顶点最小坐标 (min): {v_min.tolist()}")
+    print(f"顶点最大坐标 (max): {v_max.tolist()}")
+
+    # 2. 模型尺寸 (width, height, depth)
+    size = v_max - v_min
+    print(f"模型尺寸 X(宽): {size[0]:.3f}")
+    print(f"模型尺寸 Y(深): {size[1]:.3f}")
+    print(f"模型尺寸 Z(高): {size[2]:.3f}")
+
+    # 3. 模型几何中心
+    center = (v_min + v_max) / 2
+    print(f"模型几何中心: {center.tolist()}")
+
+    # 4. 模型底面中心（你CARLA对齐用的地面点）
+    bottom_center = torch.tensor([
+        center[0],
+        center[1],
+        v_min[2]  # Z取最低 = 地面
+    ], device=device)
+    print(f"模型底面中心点 (地面接触点): {bottom_center.tolist()}")
+
+    # 5. 当前模型原点（就是OBJ导出时的原点：(0,0,0) 在模型中的位置）
+    print(f"OBJ文件原点 (0,0,0) 相对于模型的位置: [0, 0, 0]")
+    print("⚠️  说明：PyTorch3D加载后的原点 = Blender里设置的原点")
+    print("="*60 + "\n")
+
+    print(f"共生成 {len(meshes_list)} 个子 Mesh (材质分割)")
+
+    return meshes_list, material_names_list
 
 def generate_camera_from_params(
     pose_paths: list,  
     device: torch.device,
     fov: float = 110.0,  
-    img_size: tuple = (640, 480)  # (width, height)
+    img_size: tuple = (720, 1280)  # ( height,width)
 ) -> FoVPerspectiveCameras:  # 修正返回类型：PerspectiveCameras → FoVPerspectiveCameras
     """
     批量加载位姿文件，生成单个批量相机对象（而非列表）
@@ -475,14 +885,18 @@ def generate_camera_from_params(
         pose_paths: 相机位姿文件路径列表
         device: 运行设备 (cpu/cuda)
         fov: 相机视场角（单位：度），默认110°
-        img_size: 图像尺寸 (width, height)，默认(640,480)
+        img_size: 图像尺寸 (width, height)，默认(720,1280)
     返回：
         FoVPerspectiveCameras: 批量相机对象（包含len(pose_paths)个相机）
     """
     # ================= 1 初始化存储列表 =================
     R_list = []  # 存储所有相机的旋转矩阵 (3,3)
     T_list = []  # 存储所有相机的平移向量 (3,)
-
+    H,W=img_size
+    fov_horizontal_deg = fov
+    aspect = W / H
+    fov_h_rad = math.radians(fov_horizontal_deg)
+    fov_v_rad = math.degrees(2 * math.atan(math.tan(fov_h_rad / 2) / aspect))
     # ================= 2 批量加载位姿并计算外参 =================
     for pose_path in pose_paths:
         # 加载单个位姿文件
@@ -490,20 +904,21 @@ def generate_camera_from_params(
         if pose is None:
             raise ValueError(f"位姿文件加载失败：{pose_path}")
         
-        # 提取相机位置
-        pt3D_x, pt3D_z, pt3D_y = pose['location']
+        # 提取相机位置,#可能要取负号,以calra为准，相机相对车辆原点的坐标（车辆底部的中心）
+        x, y, z = pose['location']
         
         # 计算俯仰角和方位角（修正坐标系转换）
-        pitch = np.degrees(np.arctan2(pt3D_y, np.sqrt(pt3D_x**2 + pt3D_z**2)))
-        # 3D torch ,pytoch3D 和carla 坐标系关系，需如下调整
-        azim_angle = np.degrees(np.arctan2(pt3D_x, pt3D_z))  
-        azim_angle = azim_angle  # 符号修正
-        
+        distance=np.sqrt(x**2 + z**2 + y**2)
+        pitch_carla = np.degrees(np.arctan2(z, np.sqrt(x**2 + y**2)))
+        pitch=pitch_carla
+        # 修正水平角度
+        yaw_crla = -np.degrees(np.arctan2(y, x))  
+        yaw=(yaw_crla-90)+180 # 修正坐标系转换，需要注意车辆坐标，carla坐标，opytorch3D坐标
         # 生成单个相机的外参
         R_single, T_single = look_at_view_transform(
-            dist=4.0,
+            dist=distance,
             elev=pitch,
-            azim=azim_angle
+            azim=yaw
         )
         
         # 转换为tensor并移到指定设备，去除batch维度
@@ -525,7 +940,9 @@ def generate_camera_from_params(
         device=device,
         R=R_batch,                  # 批量旋转矩阵 (B, 3, 3)
         T=T_batch,                  # 批量平移向量 (B, 3)
-        fov=fov,                    # 所有相机共用的视场角
+        fov=fov_v_rad,                    # 所有相机共用的视场角
+        znear=0.1,                 # 所有相机共用的近裁剪面
+        zfar=100.0,                 # 所有相机共用的远裁剪面
         # aspect_ratio=img_size[1]/img_size[0],  # 宽高比
         # 显式设置图像尺寸，确保和渲染配置匹配
         
@@ -1014,18 +1431,19 @@ def main_debug2():
 
 def main_debug3():
 
+
     # -------------------------- 1. 配置路径与参数 --------------------------
     # 数据路径（按你的需求指定）
-    root="/root/autodl-fs/data/data_test/carla_data/vehicle_tesla_model3/location_000/"
-    name="fixed_002"
-    RGB_PATH = os.path.join(root, "rgb", name+".png")       # RGB图路径
+    root="/root/autodl-fs/data_debug/carla_sample_data20260411_final/vehicle_audi_tt/location_000/"
+    name="fixed_006"
+    RGB_PATH = os.path.join(root, "rgb", name+".png")       # RGB图路径,rgb
     DEPTH_PATH = os.path.join(root, "depth", name+".png")   # 深度图路径
-    MASK_PATH = os.path.join(root, "mask", name+".png")     # 掩码图路径
+    MASK_PATH = os.path.join(root, "mask", name+".png")     # 掩码图路径  
     POSE_PATH = os.path.join(root, "camera_pose", name+".npz")   # 位姿文件路径
     INTRINSICS_PATH = os.path.join(root, "camera_intrinsics", name+".npz")  # 内参文件路径
     SAVE_DIR = "./debug_results/exp2"  # 结果保存目录
-    OBJECT_OBJ_PATH = '/root/autodl-fs/data/object_model/old.obj'  # OBJ模型路径
-    OBJECT_OBJ_PATH = '/root/autodl-fs/data/object_model/byd_yangwang.obj'  # OBJ模型路径
+    OBJECT_OBJ_PATH = '/root/autodl-fs/data_debug/rect/Untitled.obj'  # OBJ模型路径
+    # OBJECT_OBJ_PATH = '/root/autodl-fs/MM3DAdv_data/3Dmodel/mazda/mazda_part.obj'  # OBJ模型路径
     # 
     # OBJECT_OBJ_PATH = '/root/autodl-fs/data/object_model/TeslaModel3_blue.obj'
     # 图像尺寸（从RGB图自动获取，也可手动指定）
@@ -1074,8 +1492,7 @@ def main_debug3():
     target_index_dict={}
     target_list=[1,3]
     for i,material in enumerate(material_list):
-        if i in target_list:
-            target_index_dict[material]=tex
+        target_index_dict[material]=tex
 
     new_mesh1=update_meshes_texture_dict(
         original_meshes_list=mesh_model,

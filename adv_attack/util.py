@@ -13,12 +13,583 @@ from torchvision.ops import generalized_box_iou  # GIoU计算工具
 import torchvision.transforms as transforms
 import numpy as np
 from PIL import Image
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader,ConcatDataset
 from typing import Optional, Any,Tuple, Dict, List,Union
 from contextlib import suppress
 import pytorch_lightning as pl
 import yaml
 from torchvision.ops import box_iou
+
+import torch
+
+
+import importlib
+from copy import deepcopy
+from typing import Any, Dict, List, Union
+
+
+def build_from_cfg(
+    cfg: Union[Dict, List, Any],
+    **kwargs,
+) -> Any:
+    """
+    递归构建实例（安全版，不会把 kwargs 传给嵌套子模块）
+    仅顶层接收 kwargs，子模块自动不接收
+    """
+    # 列表 / 元组：子项不再传 kwargs
+    if isinstance(cfg, (list, tuple)):
+        return [build_from_cfg(item) for item in cfg]
+
+    # 非字典直接返回
+    if not isinstance(cfg, dict):
+        return cfg
+
+    # 普通字典：子项不再传 kwargs
+    if "target" not in cfg:
+        return {k: build_from_cfg(v) for k, v in cfg.items()}
+
+    # ==============================================
+    # 真正要实例化的类（只有这里用 kwargs）
+    # ==============================================
+    target = cfg["target"]
+    module_name, cls_name = target.rsplit(".", 1)
+
+    module = importlib.import_module(module_name)
+    cls = getattr(module, cls_name)
+
+    # 子参数 递归构建（不传 kwargs）
+    params = build_from_cfg(cfg.get("params", {}))
+
+    # 只给顶层类加 kwargs
+    params.update(kwargs)
+
+    return cls(**params)
+
+
+
+class metrics_accumulator_cal:
+    """
+    统计 adv_tensor vs origin_tensor 的多batch指标均值
+    支持：
+    - L1 / L2 / PSNR
+    - SSIM / MS-SSIM
+    - NIQE / NRQM / MUSIQ
+    """
+
+    def __init__(self, eps=1e-8, device="cpu"):
+        self.eps = eps
+        self.device = device
+
+        # ===== accumulators =====
+        self.sum_l1 = 0.0
+        self.sum_l2 = 0.0
+        self.sum_psnr = 0.0
+        self.sum_ssim = 0.0
+        self.sum_msssim = 0.0
+        self.sum_niqe = 0.0
+        self.sum_nrqm = 0.0
+        self.sum_musiq = 0.0
+
+        self.batch_count = 0
+        self.sample_count = 0
+
+        # ===== lazy init perceptual models =====
+        self._ssim_fn = None
+        self._ms_ssim_fn = None
+        self._niqe_fn = None
+        self._nrqm_fn = None
+        self._musiq_fn = None
+
+    # =========================
+    # PSNR
+    # =========================
+    @staticmethod
+    def _psnr(x, y, eps=1e-8):
+        mse = torch.mean((x - y) ** 2, dim=(1, 2, 3))
+        return 10 * torch.log10(1.0 / (mse + eps))
+
+    # =========================
+    # lazy loaders
+    # =========================
+    def _init_metrics(self):
+        """
+        延迟加载，避免启动慢
+        """
+        if self._ssim_fn is None:
+            from piq import SSIM, MS_SSIM, NIQE, NRQM, MUSIQ
+
+            self._ssim_fn = SSIM(data_range=1.0).to(self.device)
+            self._ms_ssim_fn = MS_SSIM(data_range=1.0).to(self.device)
+
+            self._niqe_fn = NIQE().to(self.device)
+            self._nrqm_fn = NRQM().to(self.device)
+            self._musiq_fn = MUSIQ().to(self.device)
+
+    # =========================
+    # main update
+    # =========================
+    def calculate(self, adv_tensor: torch.Tensor, origin_tensor: torch.Tensor):
+        """
+        单 batch 更新
+        """
+
+        assert adv_tensor.shape == origin_tensor.shape, "shape mismatch"
+
+        adv_tensor = adv_tensor.detach().float().to(self.device)
+        origin_tensor = origin_tensor.detach().float().to(self.device)
+
+        b = adv_tensor.shape[0]
+
+        # =====================
+        # pixel metrics
+        # =====================
+        l1 = torch.mean(torch.abs(adv_tensor - origin_tensor), dim=(1, 2, 3))
+        l2 = torch.mean((adv_tensor - origin_tensor) ** 2, dim=(1, 2, 3))
+        psnr = self._psnr(adv_tensor, origin_tensor, self.eps)
+
+        self.sum_l1 += l1.sum().item()
+        self.sum_l2 += l2.sum().item()
+        self.sum_psnr += psnr.sum().item()
+
+        # =====================
+        # perceptual metrics
+        # =====================
+        self._init_metrics()
+
+        # SSIM / MS-SSIM
+        ssim = self._ssim_fn(adv_tensor, origin_tensor)
+        ms_ssim = self._ms_ssim_fn(adv_tensor, origin_tensor)
+
+        # NIQE / NRQM / MUSIQ
+        # 注意：这些通常只需要 image，不需要 reference
+        niqe = self._niqe_fn(adv_tensor)
+        nrqm = self._nrqm_fn(adv_tensor)
+        musiq = self._musiq_fn(adv_tensor)
+
+        self.sum_ssim += ssim.sum().item()
+        self.sum_msssim += ms_ssim.sum().item()
+        self.sum_niqe += niqe.sum().item()
+        self.sum_nrqm += nrqm.sum().item()
+        self.sum_musiq += musiq.sum().item()
+
+        # =====================
+        # counters
+        # =====================
+        self.batch_count += 1
+        self.sample_count += b
+
+    # =========================
+    # output
+    # =========================
+    def return_average(self):
+        if self.sample_count == 0:
+            return None
+
+        return {
+            "avg_l1": self.sum_l1 / self.sample_count,
+            "avg_l2": self.sum_l2 / self.sample_count,
+            "avg_psnr": self.sum_psnr / self.sample_count,
+            "avg_ssim": self.sum_ssim / self.sample_count,
+            "avg_msssim": self.sum_msssim / self.sample_count,
+            "avg_niqe": self.sum_niqe / self.sample_count,
+            "avg_nrqm": self.sum_nrqm / self.sample_count,
+            "avg_musiq": self.sum_musiq / self.sample_count,
+            "batch_count": self.batch_count,
+            "sample_count": self.sample_count,
+        }
+
+    # =========================
+    # reset
+    # =========================
+    def reset(self):
+        self.sum_l1 = 0.0
+        self.sum_l2 = 0.0
+        self.sum_psnr = 0.0
+        self.sum_ssim = 0.0
+        self.sum_msssim = 0.0
+        self.sum_niqe = 0.0
+        self.sum_nrqm = 0.0
+        self.sum_musiq = 0.0
+
+        self.batch_count = 0
+        self.sample_count = 0
+        
+
+# def compute_detection_metrics_v2(
+#     pred,
+#     gt,
+#     iou_thresh=0.5,
+#     conf_thresh=0.5,
+# ):
+#     """
+#     标准目标检测评估（VOC-style single threshold）
+#     - 按 score 排序
+#     - greedy matching
+#     - one-to-one GT 匹配
+#     """
+
+#     import torch
+#     from torchvision.ops import box_iou
+
+#     tp = 0
+
+#     fp_bg = 0
+#     fp_cls = 0
+#     fp_dup = 0
+#     fn = 0
+
+#     gt_total = 0
+
+#     batch_size = len(pred["boxes"])
+
+#     for b in range(batch_size):
+
+#         pred_boxes  = pred["boxes"][b]
+#         pred_scores = pred["scores"][b]
+#         pred_labels = pred["labels"][b]
+
+#         gt_boxes  = gt["boxes"][b]
+#         gt_labels = gt["labels"][b]
+
+#         gt_total += len(gt_boxes)
+
+#         # ===== confidence filtering =====
+#         keep = pred_scores > conf_thresh
+#         pred_boxes  = pred_boxes[keep]
+#         pred_scores = pred_scores[keep]
+#         pred_labels = pred_labels[keep]
+
+#         # ===== 按 score 排序（关键）=====
+#         if len(pred_scores) > 0:
+#             sorted_idx = torch.argsort(pred_scores, descending=True)
+#             pred_boxes  = pred_boxes[sorted_idx]
+#             pred_scores = pred_scores[sorted_idx]
+#             pred_labels = pred_labels[sorted_idx]
+
+#         # ===== empty cases =====
+#         if len(gt_boxes) == 0:
+#             fp_bg += len(pred_boxes)
+#             continue
+
+#         if len(pred_boxes) == 0:
+#             fn += len(gt_boxes)
+#             continue
+
+#         # ===== IoU matrix =====
+#         ious = box_iou(pred_boxes, gt_boxes)
+
+#         matched_gt = torch.zeros(len(gt_boxes), dtype=torch.bool, device=gt_boxes.device)
+
+#         for i in range(len(pred_boxes)):
+
+#             iou_row = ious[i]
+
+#             max_iou, gt_idx = torch.max(iou_row, dim=0)
+#             gt_idx = gt_idx.item()
+
+#             # -------------------------
+#             # 1. IoU 不够 → 背景 FP
+#             # -------------------------
+#             if max_iou < iou_thresh:
+#                 fp_bg += 1
+#                 continue
+
+#             # -------------------------
+#             # 2. GT 已匹配 → duplicate
+#             # -------------------------
+#             if matched_gt[gt_idx]:
+#                 fp_dup += 1
+#                 continue
+
+#             # -------------------------
+#             # 3. 分类判断
+#             # -------------------------
+#             if pred_labels[i] == gt_labels[gt_idx]:
+#                 tp += 1
+#                 matched_gt[gt_idx] = True
+#             else:
+#                 fp_cls += 1
+#                 matched_gt[gt_idx] = True   
+
+#         # -------------------------
+#         # 4. FN（未匹配 GT）
+#         # -------------------------
+#         fn += (~matched_gt).sum().item()
+
+#     fp_total = fp_bg + fp_cls + fp_dup
+
+#     return {
+#         "tp": tp,
+#         "fp": fp_total,
+#         "fn": fn,
+
+#         "fp_bg": fp_bg,
+#         "fp_cls": fp_cls,
+#         "fp_dup": fp_dup,
+
+#         "gt_total": gt_total,
+#     }
+
+def compute_detection_metrics_v2(
+    pred,
+    gt,
+    iou_thresh=0.5,
+    conf_thresh=0.5,
+):
+    """
+    标准目标检测评估（VOC-style single threshold）
+    - 按 score 排序
+    - greedy matching
+    - one-to-one GT 匹配
+    """
+
+    import torch
+    from torchvision.ops import box_iou
+
+    tp = 0
+
+    fp_bg = 0
+    fp_cls = 0
+    fp_dup = 0
+    fn = 0
+
+    gt_total = 0
+
+    batch_size = len(pred["boxes"])
+
+    for b in range(batch_size):
+
+        pred_boxes  = pred["boxes"][b]
+        pred_scores = pred["scores"][b]
+        pred_labels = pred["labels"][b]
+
+        gt_boxes  = gt["boxes"][b]
+        gt_labels = gt["labels"][b]
+
+        gt_total += len(gt_boxes)
+
+        # ===== confidence filtering =====
+        keep = pred_scores > conf_thresh
+        pred_boxes  = pred_boxes[keep]
+        pred_scores = pred_scores[keep]
+        pred_labels = pred_labels[keep]
+
+        # ===== 按 score 排序（关键）=====
+        if len(pred_scores) > 0:
+            sorted_idx = torch.argsort(pred_scores, descending=True)
+            pred_boxes  = pred_boxes[sorted_idx]
+            pred_scores = pred_scores[sorted_idx]
+            pred_labels = pred_labels[sorted_idx]
+
+        # ===== empty cases =====
+        if len(gt_boxes) == 0:
+            fp_bg += len(pred_boxes)
+            continue
+
+        if len(pred_boxes) == 0:
+            fn += len(gt_boxes)
+            continue
+
+        # ===== IoU matrix =====
+        ious = box_iou(pred_boxes, gt_boxes)
+
+        matched_gt = torch.zeros(len(gt_boxes), dtype=torch.bool, device=gt_boxes.device)
+
+        for i in range(len(pred_boxes)):
+
+            iou_row = ious[i]
+            max_iou, gt_idx = torch.max(iou_row, dim=0)
+            gt_idx = gt_idx.item()
+
+            # -------------------------
+            # 1. IoU 不够 → 背景 FP
+            # -------------------------
+            if max_iou < iou_thresh:
+                fp_bg += 1
+                continue
+
+            # -------------------------
+            # 2. GT 已匹配 → duplicate
+            # -------------------------
+            if matched_gt[gt_idx]:
+                fp_dup += 1
+                continue
+
+            # -------------------------
+            # 3. 分类正确 → TP
+            # -------------------------
+            if pred_labels[i] == gt_labels[gt_idx]:
+                tp += 1
+                matched_gt[gt_idx] = True  # 占用GT
+            else:
+                fp_cls += 1
+                # 分类错误 = 不占用GT（标准做法）
+
+        # -------------------------
+        # 4. FN（未匹配 GT）
+        # -------------------------
+        fn += (~matched_gt).sum().item()
+
+    fp_total = fp_bg + fp_cls + fp_dup
+
+    return {
+        "tp": tp,
+        "fp": fp_total,
+        "fn": fn,
+
+        "fp_bg": fp_bg,
+        "fp_cls": fp_cls,
+        "fp_dup": fp_dup,
+
+        "gt_total": gt_total,
+    }
+
+
+
+def compute_detection_metrics_v3(
+    pred_adv,
+    gt,
+    pred_origin=None,
+    iou_thresh=0.5,
+    conf_thresh=0.5,
+):
+    """
+    v3:
+    - 保留 v2 detection metrics
+    - 增加 origin vs adv confidence drop 统计
+    """
+
+    def _eval_single(pred):
+        tp = 0
+        fp_bg = 0
+        fp_cls = 0
+        fp_dup = 0
+        fn = 0
+
+        # 保存每个 GT 匹配到的最高 IoU prediction confidence
+        gt_conf_map = []  # list of list per batch
+
+        batch_size = len(pred["boxes"])
+
+        for b in range(batch_size):
+
+            pred_boxes  = pred["boxes"][b]
+            pred_scores = pred["scores"][b]
+            pred_labels = pred["labels"][b]
+
+            gt_boxes  = gt["boxes"][b]
+            gt_labels = gt["labels"][b]
+
+            keep = pred_scores > conf_thresh
+            pred_boxes  = pred_boxes[keep]
+            pred_scores = pred_scores[keep]
+            pred_labels = pred_labels[keep]
+
+            if len(gt_boxes) == 0:
+                fp_bg += len(pred_boxes)
+                gt_conf_map.append([])
+                continue
+
+            if len(pred_boxes) == 0:
+                fn += len(gt_boxes)
+                gt_conf_map.append([0.0] * len(gt_boxes))
+                continue
+
+            ious = box_iou(pred_boxes, gt_boxes)
+
+            matched_gt = set()
+
+            batch_gt_conf = [0.0 for _ in range(len(gt_boxes))]
+
+            for i in range(len(pred_boxes)):
+
+                iou_row = ious[i]
+                max_iou, gt_idx = torch.max(iou_row, dim=0)
+                gt_idx = gt_idx.item()
+
+                if max_iou < iou_thresh:
+                    fp_bg += 1
+                    continue
+
+                if gt_idx in matched_gt:
+                    fp_dup += 1
+                    continue
+
+                matched_gt.add(gt_idx)
+
+                conf = pred_scores[i].item()
+
+                # 记录该 GT 的 best confidence
+                batch_gt_conf[gt_idx] = max(batch_gt_conf[gt_idx], conf)
+
+                if pred_labels[i] == gt_labels[gt_idx]:
+                    tp += 1
+                else:
+                    fp_cls += 1
+
+            fn += (len(gt_boxes) - len(matched_gt))
+            gt_conf_map.append(batch_gt_conf)
+
+        fp_total = fp_bg + fp_cls + fp_dup
+
+        return {
+            "tp": tp,
+            "fn": fn,
+            "fp_bg": fp_bg,
+            "fp_cls": fp_cls,
+            "fp_dup": fp_dup,
+            "fp": fp_total,
+            "gt_conf_map": gt_conf_map
+        }
+
+    # =========================
+    # 1. 分别计算 origin / adv
+    # =========================
+    adv_res = _eval_single(pred_adv)
+
+    origin_res = None
+    if pred_origin is not None:
+        origin_res = _eval_single(pred_origin)
+
+    # =========================
+    # 2. confidence drop 统计
+    # =========================
+    conf_drop = None
+
+    if origin_res is not None:
+
+        adv_conf = adv_res["gt_conf_map"]
+        ori_conf = origin_res["gt_conf_map"]
+
+        batch_drop = []
+
+        for b in range(len(adv_conf)):
+            adv_c = torch.tensor(adv_conf[b])
+            ori_c = torch.tensor(ori_conf[b])
+
+            # 对齐长度（GT数）
+            min_len = min(len(adv_c), len(ori_c))
+            if min_len == 0:
+                batch_drop.append(0.0)
+                continue
+
+            drop = (ori_c[:min_len] - adv_c[:min_len]).mean().item()
+            batch_drop.append(drop)
+
+        conf_drop = {
+            "mean_drop": sum(batch_drop) / len(batch_drop),
+            "batch_drop": batch_drop
+        }
+
+    # =========================
+    # 3. 输出
+    # =========================
+    return {
+        "adv": adv_res,
+        "origin": origin_res,
+        "confidence_drop": conf_drop
+    }
+
 
 def mask_to_gt_dict(
     mask_tensor: torch.Tensor,
@@ -3780,8 +4351,8 @@ class RGBCameraPoseDataset(Dataset):
             else:
                 print(f"警告：{rgb_fn} 无对应位姿文件 {pose_fn}，跳过该样本")
         
-        assert len(self.valid_samples) > 0, f"无有效样本！检查 {root_dir} 下的rgb和camera_pose文件夹"
-        print(f"数据集初始化完成：{root_dir} → 有效样本数：{len(self.valid_samples)}")
+        # assert len(self.valid_samples) > 0, f"无有效样本！检查 {root_dir} 下的rgb和camera_pose文件夹"
+        # print(f"数据集初始化完成：{root_dir} → 有效样本数：{len(self.valid_samples)}")
 
     def __len__(self) -> int:
         """返回数据集总样本数"""
@@ -3859,6 +4430,106 @@ def build_RGBCameraPose_dataloader(
 
     return train_loader, val_loader
 
+
+
+def build_RGBCameraPose_dataloader_single_path(
+    root_dir: str,                          # 总根目录
+    batch_size: int = 4,
+    num_workers: int = 4,
+    transform = None
+) -> Tuple[DataLoader, DataLoader]:
+    """
+    支持 2N 组数据自动配对
+    目录规则：
+        root_dir/
+            xxx1        → 训练
+            xxx1_random → 验证
+            xxx2        → 训练
+            xxx2_random → 验证
+            ...
+            xxxN        → 训练
+            xxxN_random → 验证
+
+    自动将所有 xxx 合并为训练集
+    自动将所有 xxx_random 合并为验证集
+    """
+
+    # ====================== 1. 扫描所有子文件夹 ======================
+    all_subfolders = []
+    for fname in os.listdir(root_dir):
+        fpath = os.path.join(root_dir, fname)
+        if os.path.isdir(fpath):
+            all_subfolders.append((fname, fpath))
+
+    # ====================== 2. 自动配对：xxx ↔ xxx_random ======================
+    train_dirs: List[str] = []
+    val_dirs: List[str] = []
+    seen = set()
+
+    for fname, fpath in all_subfolders:
+        if fname in seen:
+            continue
+
+        if fname.endswith("_random"):
+            # 这是验证集，找对应的训练集
+            base_name = fname[:-7]  # 去掉 "_random"
+            train_dir = os.path.join(root_dir, base_name)
+            val_dir = fpath
+
+            if os.path.isdir(train_dir):
+                train_dirs.append(train_dir)
+                val_dirs.append(val_dir)
+                seen.add(fname)
+                seen.add(base_name)
+        else:
+            # 这是训练集，找对应的验证集
+            val_name = fname + "_random"
+            val_dir = os.path.join(root_dir, val_name)
+            train_dir = fpath
+
+            if os.path.isdir(val_dir):
+                train_dirs.append(train_dir)
+                val_dirs.append(val_dir)
+                seen.add(fname)
+                seen.add(val_name)
+
+    # ====================== 3. 构建合并数据集 ======================
+    # 合并所有训练集
+    train_datasets = [
+        RGBCameraPoseDataset(root_dir=d, transform=transform)
+        for d in train_dirs
+    ]
+    train_dataset = ConcatDataset(train_datasets)
+
+    # 合并所有验证集
+    val_datasets = [
+        RGBCameraPoseDataset(root_dir=d, transform=transform)
+        for d in val_dirs
+    ]
+    val_dataset = ConcatDataset(val_datasets)
+
+    # ====================== 4. 构建 DataLoader ======================
+    train_loader = DataLoader(
+        dataset=train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=True,
+        drop_last=True
+    )
+
+    val_loader = DataLoader(
+        dataset=val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True
+    )
+
+    print(f"loaddata finish")
+
+
+    return train_loader, val_loader
 
 
 # def resize_tensor(adv_tensor_generate, height, width, mode='bilinear', align_corners=False):

@@ -18,6 +18,7 @@ from tqdm import tqdm
 import sys
 from pytorch_lightning import seed_everything
 import time
+from scipy.spatial import Voronoi
 
 from annotator.util import resize_image, HWC3
 from annotator.canny import CannyDetector
@@ -30,6 +31,7 @@ from cldm.ddim_hacked import DDIMSampler
 from adv_attack import *
 from adv_attack.attack_class import *
 from adv_attack.util import *
+import argparse  # 导入argparse库
 
 def get_contour_canny_tensor(
     input_image: np.ndarray,
@@ -241,29 +243,99 @@ def get_contour_tensor(
     control = control.to(dtype=torch.float32)
     
     return control
-import argparse  # 导入argparse库
 
-# 1. 创建参数解析器
-parser = argparse.ArgumentParser(description="Adversarial Attack Main Program")  # 程序描述
 
-# 2. 添加命令行参数
+def get_voronoi_canny_edge_tensor(
+    image_resolution: int = 512,
+    num_samples: int = 1,
+    n_seeds: int = 60,
+    device: torch.device = None
+) -> torch.Tensor:
+    """
+    直接生成 Voronoi 几何边缘图（无颜色、无渲染）
+    输出格式完全对齐 get_canny_edge_tensor：
+    return: B×C×H×W float32 tensor [0~1]
+    """
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-parser.add_argument('--model_config_path', type=str, 
-                    default="./configs/model_config/models_params.yaml",
-                      help="model config path")
+    H = W = image_resolution
 
-parser.add_argument('--exp_config_path', type=str, 
-                    default="./configs/exp_config/exp_params.yaml",
-                      help="exp config path")
-parser.add_argument('--detect_config_path', type=str, 
-                    default="./configs/detect_config/detect_config.yaml",
-                      help="detection config path")
-parser.add_argument('--adv_config_path', type=str, 
-                    default="./configs/adv_config/adv_params.yaml",
-                      help="adv config path")
+    # 1. 生成 Voronoi 归属图
+    seeds = np.random.rand(n_seeds, 2)
+    grid = np.stack(np.meshgrid(np.linspace(0, 1, W), np.linspace(0, 1, H)), axis=-1)
+    grid_flat = grid.reshape(-1, 2)
+    dists = np.linalg.norm(grid_flat[:, None, :] - seeds[None, :, :], axis=-1)
+    idx_flat = dists.argmin(axis=-1)
+    idx_map = idx_flat.reshape(H, W)
 
-# 3. 解析命令行参数
-args = parser.parse_args()
+    # 2. 正确生成边界（无维度错误）
+    edge = np.zeros((H, W), dtype=np.uint8)
+
+    # 内部边界（正确写法）
+    edge[1:, :] |= (idx_map[1:, :] != idx_map[:-1, :])
+    edge[:, 1:] |= (idx_map[:, 1:] != idx_map[:, :-1])
+
+    edge = (edge > 0).astype(np.uint8) * 255
+
+    # 3. 转 3 通道
+    detected_map = np.stack([edge, edge, edge], axis=-1)
+
+    # 4. 格式对齐原 Canny 函数输出
+    control = torch.from_numpy(detected_map.copy()).float().to(device) / 255.0
+    control = torch.stack([control for _ in range(num_samples)], dim=0)
+    control = einops.rearrange(control, 'b h w c -> b c h w').contiguous()
+    control = control.to(dtype=torch.float32)
+
+    return control
+
+
+def load_all_configs():
+    """
+    封装：命令行参数解析 + 加载所有yaml配置 + 创建实验目录 + 复制配置文件
+    返回：model_params, exp_params, detect_params, adv_params, exp_root
+    """
+    # 1. 参数解析
+    parser = argparse.ArgumentParser(description="Adversarial Attack Main Program")
+
+    parser.add_argument('--model_config_path', type=str, 
+                        default="./configs/model_config/models_params.yaml",
+                        help="model config path")
+
+    parser.add_argument('--exp_config_path', type=str, 
+                        default="./configs/exp_config/exp_params.yaml",
+                        help="exp config path")
+
+    parser.add_argument('--detect_config_path', type=str, 
+                        default="./configs/detect_config/detect_config.yaml",
+                        help="detection config path")
+
+    parser.add_argument('--adv_config_path', type=str, 
+                        default="./configs/adv_config/adv_params.yaml",
+                        help="adv config path")
+
+    args = parser.parse_args()
+
+    # 2. 加载配置
+    model_params = load_yaml_config(args.model_config_path)
+    exp_params = load_yaml_config(args.exp_config_path)
+    detect_params = load_yaml_config(args.detect_config_path)
+    adv_params = load_yaml_config(args.adv_config_path)
+
+    # 3. 创建实验目录并复制配置文件
+    exp_root = exp_params["experiment_path"]
+    os.makedirs(exp_root, exist_ok=True)
+    # visual_path
+    exp_params["visual_path"] = os.path.join(exp_root, "visual_path")
+    os.makedirs(exp_params["visual_path"], exist_ok=True)
+
+
+    shutil.copy(args.model_config_path, exp_root)
+    shutil.copy(args.exp_config_path, exp_root)
+    shutil.copy(args.detect_config_path, exp_root)
+    shutil.copy(args.adv_config_path, exp_root)
+
+    return model_params, exp_params, detect_params, adv_params
 
 
 if __name__ == '__main__':
@@ -272,22 +344,8 @@ if __name__ == '__main__':
     # -------------------------- 
 
 
-    model_params=load_yaml_config(args.model_config_path)
-    exp_params=load_yaml_config(args.exp_config_path)
-    detect_params=load_yaml_config(args.detect_config_path)
-    adv_params=load_yaml_config(args.adv_config_path)
 
-    exp_root=exp_params["experiment_path"]
-    # 创建实验目录
-    os.makedirs(exp_root, exist_ok=True)
-    # 将yaml文件复制到实验目录
-    shutil.copy(args.model_config_path, exp_root)
-    shutil.copy(args.exp_config_path, exp_root)
-    shutil.copy(args.detect_config_path, exp_root)
-    shutil.copy(args.adv_config_path, exp_root)
-
-
-
+    model_params, exp_params, detect_params, adv_params = load_all_configs()
     
     attack=MM3DAdv_ATTACK( 
                   model_params=model_params,
@@ -310,30 +368,11 @@ if __name__ == '__main__':
         high_threshold=240
     )
 
-    # canny_tensor = get_contour_tensor(
-    #     input_image=img,
-    #     image_resolution=512,
-    #     num_samples=1,
-    #     low_threshold=10,
-    #     high_threshold=200
-    # )
-    
-    # canny_tensor = get_contour_canny_tensor(
-    #     input_image=img,
-    #     image_resolution=512,
-    #     num_samples=1,
-    #     low_threshold=10,
-    #     high_threshold=200 
-    # )
 
-    # canny_tensor = get_canny_edge_tensor1(
-    #     input_image=img,
-    #     resize_size=128,       # 512/4=128
-    #     target_size=512,       # 最终拼接为512×512
-    #     num_samples=1,
-    #     low_threshold=50,
-    #     high_threshold=150
-    # )
+    canny_tensor=get_voronoi_canny_edge_tensor(
+                    image_resolution=512,
+                    num_samples=1,
+                    n_seeds=60) 
 
     if canny_tensor.dim()==3:  # 添加维度
         canny_tensor = canny_tensor.unsqueeze(0)
