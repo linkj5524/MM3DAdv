@@ -1,4 +1,5 @@
 
+import json
 import time
 
 from omegaconf import OmegaConf
@@ -229,10 +230,18 @@ class MM3DAdv_ATTACK:
         else :
             control_text=[self.adv_params["prompt"] ]*B
 
+        # if negtive_class is not None:
+        #     negtive_control_text=[' '.join([s1]*5)+" . "+" . "+s1+self.adv_params["n_prompt"] for s1 in   negtive_class]
+        # else :
+        #     negtive_control_text=[self.adv_params["n_prompt"]] * B
+
         if negtive_class is not None:
-            negtive_control_text=[' '.join([s1]*5)+" . "+" . "+s1+self.adv_params["n_prompt"] for s1 in   negtive_class]
-        else :
-            negtive_control_text=[self.adv_params["n_prompt"]] * B
+            # 有负面类别：类别 + 负面提示，然后复制 B 份（匹配 batch）
+            negtive_control_text = [negtive_class + self.adv_params["n_prompt"]] * B
+        else:
+            # 没有：只用默认负面提示，复制 B 份
+            negtive_control_text = [self.adv_params["n_prompt"]] * B
+            
         # c_concat 草图控制；c_crossattn 跨模态控制：正向和附加的文本提示;文本内容默认用clip编码
         cond = {
             "c_concat": [control_image],
@@ -1025,7 +1034,7 @@ class MM3DAdv_ATTACK:
 
         # ========== 4. 每个模型统计 ==========
         model_stats = {}  # model_name -> {tp, fp, fn, gt_total}
-
+        metrices_all = {}  # model_name -> {precision, recall, accuracy, fpr, asr}
         # ========== 5. 遍历数据 ==========
         step_num=0
         for backgroud_images, cameras_pose_path in val_loader:
@@ -1088,6 +1097,7 @@ class MM3DAdv_ATTACK:
             mask_resized = resize_tensor_ratio_pad(object_mask, detect_size, detect_size)
 
             # ---------- GT ----------
+            # 根据mask构造gt
             gt_dict = mask_to_gt_dict(
                 mask_tensor=mask_resized,
                 label=self.exp_params["target_class"],
@@ -1099,16 +1109,21 @@ class MM3DAdv_ATTACK:
             if save_visual:
                 adv_detect_path_list=[os.path.join(save_tensor_root,f"adv_detect_b{step_num}_{i}") for i in range(adv_img.shape[0])]
                 origin_detect_path_list=[os.path.join(save_tensor_root,f"origin_detect_b{step_num}_{i}") for i in range(origin_img.shape[0])]
+        
+                # 2. 得到列表后，创建每一个路径对应的目录
+                for path in adv_detect_path_list + origin_detect_path_list:
+                    os.makedirs(path, exist_ok=True)
+
             else:
                 adv_detect_path_list=None
                 origin_detect_path_list=None
             step_num+=1
             # 保存tensor为图像
+
             if save_visual:
-                if save_visual:
-                    for i in range(adv_img.shape[0]):
-                            tensor2picture(adv_rendered[i],os.path.join( adv_detect_path_list[i]),"adv.jpg")
-                            tensor2picture(origin_rendered[i],os.path.join( origin_detect_path_list[i]),"adv.jpg")
+                for i in range(adv_img.shape[0]):
+                        tensor2picture(adv_rendered[i],os.path.join( adv_detect_path_list[i],"adv.jpg"))
+                        tensor2picture(origin_rendered[i],os.path.join( origin_detect_path_list[i],"origin.jpg"))
 
                     
 
@@ -1125,6 +1140,12 @@ class MM3DAdv_ATTACK:
                 input_file_name="origin_",
             )
 
+            metics_1=camouflage_metrics_lib(adv_img=adv_rendered, 
+                                            ori_img=origin_rendered,
+                                                bg_img=backgroud_images, 
+                                                mask=object_mask)
+            for k,v in metics_1.items():
+                metrices_all[k]=v+metrices_all.get(k,0)
             # ---------- per-model 统计 ----------
             for model_name in result_origin_dict.keys():
 
@@ -1143,6 +1164,8 @@ class MM3DAdv_ATTACK:
                     conf_thresh=self.exp_params["conf_threshold_val"],
                 )
 
+
+                
                 model_stats[model_name]["tp"] += stats["tp"]
                 model_stats[model_name]["fp"] += stats["fp"]
                 model_stats[model_name]["fn"] += stats["fn"]
@@ -1195,6 +1218,23 @@ class MM3DAdv_ATTACK:
                 else:
                     print(f"{k}: {v}")
 
+        # ========== 7. 平均值 ==========
+        metrics_avg = {}
+        for k ,v in metrices_all.items():
+            metrics_avg[k]=v/step_num
+        print("\n===== Validation Metrics (Avg) =====")
+        for k, v in metrics_avg.items():
+            if isinstance(v, float):
+                print(f"{k}: {v:.4f}")
+            else:
+                print(f"{k}: {v}")
+
+        # ========== 8. 保存结果 ==========
+        if self.exp_params["save_result_path"] is not None:
+            save_result_path = os.path.join(self.exp_params["save_result_path"], "result.json")
+            with open(save_result_path, "w") as f:
+                json.dump(metrics_all_models, f, indent=4)
+                json.dump(metrics_avg, f, indent=4)
         return metrics_all_models
 
 

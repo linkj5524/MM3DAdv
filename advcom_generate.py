@@ -359,14 +359,14 @@ if __name__ == '__main__':
     # img=cv2.imread(r"./test_imgs/dog.png")
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # 转为 RGB
     
-    # 2. 调用 Canny 函数
-    canny_tensor = get_canny_edge_tensor(
-        input_image=img,
-        image_resolution=512,
-        num_samples=1,
-        low_threshold=150,
-        high_threshold=240
-    )
+    # # 2. 调用 Canny 函数
+    # canny_tensor = get_canny_edge_tensor(
+    #     input_image=img,
+    #     image_resolution=512,
+    #     num_samples=1,
+    #     low_threshold=150,
+    #     high_threshold=240
+    # )
 
 
     canny_tensor=get_voronoi_canny_edge_tensor(

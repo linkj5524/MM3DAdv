@@ -27,6 +27,12 @@ import importlib
 from copy import deepcopy
 from typing import Any, Dict, List, Union
 
+from torchmetrics.functional import (
+    peak_signal_noise_ratio, 
+    mean_squared_error, 
+    mean_absolute_error,
+    structural_similarity_index_measure
+)
 
 def build_from_cfg(
     cfg: Union[Dict, List, Any],
@@ -1452,6 +1458,71 @@ class MaskedL1L2Loss(nn.Module):
             )
         
         return mask_tensor
+
+
+
+
+
+def camouflage_metrics_lib(adv_img, ori_img, bg_img, mask):
+    """
+    使用 torchmetrics 库计算指标
+    adv_img, ori_img, bg_img: [B, 3, H, W], 0-1 float
+    mask: [B, 1, H, W], 0-1 float
+    """
+    device = adv_img.device
+    mask = (mask > 0.5).float()
+    mask3 = mask.expand(-1, 3, -1, -1)
+    
+    # ------------------- 1. MSE / MAE / PSNR -------------------
+    # 对于点对点的像素指标，直接提取有效像素计算最准确
+    def get_pixel_metrics(img_a, img_b):
+        # 只提取 mask 覆盖的像素点，展平为 [N]
+        val_a = img_a[mask3 > 0.5]
+        val_b = img_b[mask3 > 0.5]
+        
+        mse = mean_squared_error(val_a, val_b)
+        mae = mean_absolute_error(val_a, val_b)
+        # PSNR 需要指定数据范围 data_range
+        psnr = peak_signal_noise_ratio(val_a, val_b, data_range=1.0)
+        return mse, mae, psnr
+
+    mse_ori, mae_ori, psnr_ori = get_pixel_metrics(adv_img, ori_img)
+    mse_bg, mae_bg, psnr_bg = get_pixel_metrics(adv_img, bg_img)
+
+    # ------------------- 2. SSIM (结构相似性) -------------------
+    # SSIM 是滑动窗口计算，不能直接提取像素，需要特殊处理 mask
+    def get_masked_ssim(img1, img2):
+        # return_full_image=True 会返回每个像素点的 SSIM 值
+        # torchmetrics 的 SSIM 默认使用高斯窗，符合标准定义
+        ssim_val, ssim_map = structural_similarity_index_measure(
+            img1, img2, data_range=1.0, return_full_image=True
+        )
+        # 只计算 mask 区域内的 SSIM 均值
+        masked_ssim_val = (ssim_map * mask3).sum() / (mask3.sum() + 1e-8)
+        return masked_ssim_val
+
+    ssim_ori = get_masked_ssim(adv_img, ori_img)
+    ssim_bg = get_masked_ssim(adv_img, bg_img)
+
+    # ------------------- 3. 余弦相似度 -------------------
+    def get_cos_sim(img_a, img_b):
+        val_a = img_a[mask3 > 0.5].view(1, -1)
+        val_b = img_b[mask3 > 0.5].view(1, -1)
+        return F.cosine_similarity(val_a, val_b)
+
+    cos_ori = get_cos_sim(adv_img, ori_img)
+    cos_bg = get_cos_sim(adv_img, bg_img)
+
+    # ------------------- 输出结果 -------------------
+    return {
+        "MSE_to_BG": round(mse_bg.item(), 6),
+        "MAE_to_BG": round(mae_bg.item(), 6),
+        "PSNR_to_BG": round(psnr_bg.item(), 4),
+        "SSIM_to_BG": round(ssim_bg.item(), 4),
+        "CosSim_to_BG": round(cos_bg.item(), 4),
+        "PSNR_to_Ori": round(psnr_ori.item(), 4),
+        "Camouflage_Score": round((cos_bg - cos_ori).item(), 4)
+    }
 
 
 def tensor2picture(tensor, save_path, norm_status=False, use_opencv=False):
@@ -4532,6 +4603,196 @@ def build_RGBCameraPose_dataloader_single_path(
     return train_loader, val_loader
 
 
+def build_RGBCameraPose_dataloader_single_pathV1(
+    root_dir: str,                          # 总根目录
+    batch_size: int = 4,
+    num_workers: int = 4,
+    transform = None
+) -> Tuple[DataLoader, DataLoader]:
+    """
+    支持 2N 组数据自动配对（递归遍历所有层级子目录）
+    目录规则：
+        root_dir/
+            xxx1        → 训练
+            xxx1_random → 验证
+            xxx2/
+                sub_xxx2 → 训练
+                sub_xxx2_random → 验证
+            ...
+            xxxN        → 训练
+            xxxN_random → 验证
+
+    自动将所有 xxx 合并为训练集
+    自动将所有 xxx_random 合并为验证集
+    """
+
+    # ====================== 1. 递归扫描所有子文件夹（所有层级） ======================
+    all_dirs = []  # 存储所有目录的 (目录名, 完整路径)
+    
+    # 递归遍历所有子目录
+    for current_root, sub_folders, files in os.walk(root_dir):
+        for folder_name in sub_folders:
+            folder_path = os.path.join(current_root, folder_name)
+            all_dirs.append((folder_name, folder_path))
+
+    # ====================== 2. 自动配对：xxx ↔ xxx_random ======================
+    train_dirs: List[str] = []
+    val_dirs: List[str] = []
+    seen = set()
+
+    for fname, fpath in all_dirs:
+        if fpath in seen:  # 用路径去重，避免重复添加
+            continue
+
+        if fname.endswith("_random"):
+            # 这是验证集，找对应的训练集
+            base_name = fname[:-7]  # 去掉 "_random"
+            # 训练集和验证集在**同一个父目录**下
+            parent_dir = os.path.dirname(fpath)
+            train_dir = os.path.join(parent_dir, base_name)
+            val_dir = fpath
+
+            if os.path.isdir(train_dir):
+                train_dirs.append(train_dir)
+                val_dirs.append(val_dir)
+                seen.add(train_dir)
+                seen.add(val_dir)
+        else:
+            # 这是训练集，找对应的验证集
+            val_name = fname + "_random"
+            # 训练集和验证集在**同一个父目录**下
+            parent_dir = os.path.dirname(fpath)
+            val_dir = os.path.join(parent_dir, val_name)
+            train_dir = fpath
+
+            if os.path.isdir(val_dir):
+                train_dirs.append(train_dir)
+                val_dirs.append(val_dir)
+                seen.add(train_dir)
+                seen.add(val_dir)
+
+    # ====================== 3. 构建合并数据集 ======================
+    # 合并所有训练集
+    train_datasets = [
+        RGBCameraPoseDataset(root_dir=d, transform=transform)
+        for d in train_dirs
+    ]
+    train_dataset = ConcatDataset(train_datasets)
+
+    # 合并所有验证集
+    val_datasets = [
+        RGBCameraPoseDataset(root_dir=d, transform=transform)
+        for d in val_dirs
+    ]
+    val_dataset = ConcatDataset(val_datasets)
+
+    # ====================== 4. 构建 DataLoader ======================
+    train_loader = DataLoader(
+        dataset=train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=True,
+        drop_last=True
+    )
+
+    val_loader = DataLoader(
+        dataset=val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True
+    )
+
+    print(f" 数据加载完成 | 训练集目录数: {len(train_dirs)} | 验证集目录数: {len(val_dirs)}")
+    print(f" 训练集总样本数: {len(train_dataset)} | 验证集总样本数: {len(val_dataset)}")
+
+    return train_loader, val_loader
+
+
+
+
+def build_RGBCameraPose_dataloader_single_pathV2(
+    root_dir: str,
+    batch_size: int = 4,
+    num_workers: int = 4,
+    transform = None
+) -> Tuple[DataLoader, DataLoader]:
+    """
+    支持结构：
+    1. root/train, root/val
+    2. root/groupA/train, root/groupA/val
+       root/groupB/train, root/groupB/val
+
+    规则：
+    - 自动遍历所有 train/val 文件夹
+    - 加载 train/val 下的每一个子目录作为数据路径
+    - 自动排除 名称包含 random 的目录
+    """
+
+    # ===================== 1. 递归找到所有 train / val 文件夹 =====================
+    all_train_paths = []
+    all_val_paths = []
+
+    for current_root, sub_folders, _ in os.walk(root_dir):
+        for folder in sub_folders:
+            full_path = os.path.join(current_root, folder)
+            if folder == "train":
+                all_train_paths.append(full_path)
+            elif folder == "val":
+                all_val_paths.append(full_path)
+
+    # ===================== 2. 收集 train 下的子目录（排除 random）=====================
+    train_dirs = []
+    for train_root in all_train_paths:
+        for fname in os.listdir(train_root):
+            sub_dir = os.path.join(train_root, fname)
+            if os.path.isdir(sub_dir) and "random" not in fname:
+                train_dirs.append(sub_dir)
+
+    # ===================== 3. 收集 val 下的子目录（排除 random）=====================
+    val_dirs = []
+    for val_root in all_val_paths:
+        for fname in os.listdir(val_root):
+            sub_dir = os.path.join(val_root, fname)
+            if os.path.isdir(sub_dir) and "random" not in fname:
+                val_dirs.append(sub_dir)
+
+    # ===================== 4. 构建数据集 =====================
+    train_datasets = [RGBCameraPoseDataset(root_dir=d, transform=transform) for d in train_dirs]
+    val_datasets = [RGBCameraPoseDataset(root_dir=d, transform=transform) for d in val_dirs]
+
+    train_dataset = ConcatDataset(train_datasets)
+    val_dataset = ConcatDataset(val_datasets)
+
+    # ===================== 5. 构建 DataLoader =====================
+    train_loader = DataLoader(
+        dataset=train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=True,
+        drop_last=True
+    )
+
+    val_loader = DataLoader(
+        dataset=val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True
+    )
+
+    # ===================== LOG =====================
+    print("=" * 60)
+    print(f"数据集加载完成！")
+    print(f"训练集目录数量: {len(train_dirs)}")
+    print(f"验证集目录数量: {len(val_dirs)}")
+    print(f"训练集总样本数: {len(train_dataset)}")
+    print(f"验证集总样本数: {len(val_dataset)}")
+    print("=" * 60)
+
+    return train_loader, val_loader
 # def resize_tensor(adv_tensor_generate, height, width, mode='bilinear', align_corners=False):
 #     """
 #     调整批量图像张量尺寸（仅支持 4D 张量），保证梯度反向传播不中断

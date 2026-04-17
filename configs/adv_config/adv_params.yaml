@@ -5,9 +5,9 @@
 
 prompt: "urban camouflage texture, city camouflage, building facade pattern, concrete and metal texture"
 n_prompt: ". blurry, low resolution, ugly, deformed, noisy texture, pixelated, unrealistic, bad detail, distorted pattern, edge mismatch, pattern fragmentation, over-saturated colors, glossy surface, cartoonish, 3d render artifacts, extra edges, missing edges"
-ddim_steps: 30
+ddim_steps: 50
 guess_mode: false
-strength: 1 # 默认 1.0, 0.7 纹理更丰富
+strength: 0.7 # 默认 1.0, 0.7 纹理更丰富
 scale: 9   # 默认9
 scale_optim: 9
 seed: 42

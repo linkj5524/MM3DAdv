@@ -38,7 +38,7 @@ import argparse  # 导入argparse库
 parser = argparse.ArgumentParser(description="Adversarial Attack Main Program")  # 程序描述
 
 # 2. 添加命令行参数
-
+  
 
 
 parser.add_argument('--exp_config_path', type=str, 
@@ -77,7 +77,7 @@ if __name__ == '__main__':
 
 
 
-    texture_path=r"exp/260112_optim_test/texture/texture.pt"
+    texture_path=r"/root/autodl-fs/MM3Dadv_exp/attack/yolov8_1/texture/texture_400.pt"
     attack.validate_adversarial_texture(texture_pt_path= texture_path,
                                         save_visual=True)
 

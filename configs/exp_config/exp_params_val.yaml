@@ -41,7 +41,7 @@ perceptual_loss_weight: 0.01 ## 默认1： 1000 默认2：1000
 class_loss_weight : 1  # 1  
 HUV_loss_weight : 5
 
-experiment_path: "exp/260112_optim_val/"
+experiment_path: /root/autodl-fs/MM3Dadv_exp/val/attack_val/yolov8_1
 # train_root_dir : "/root/autodl-fs/MM3DAdv_data/env_data/carla_sample_data20260316/vehicle_tesla_model3/location_000"
 # val_root_dir : "/root/autodl-fs/MM3DAdv_data/env_data/carla_sample_data20260316/vehicle_tesla_model3/location_000_random"
 
@@ -50,12 +50,13 @@ conf_threshold_val: 0.05
 
 
 
+
 dataloader:
-  target: adv_attack.util.build_RGBCameraPose_dataloader_single_path
+  target: adv_attack.util.build_RGBCameraPose_dataloader_single_pathV2
 
   params:
-    root_dir: "/root/autodl-fs/MM3DAdv_data/env_data/carla_sample_data20260316/vehicle_tesla_model3"
-
+    root_dir: "/root/autodl-fs/MM3DAdv_data/env_map/carla_sample_data20260412"
+    
 
     transform:
       target: torchvision.transforms.Compose
@@ -68,11 +69,12 @@ dataloader:
 batch_size: 1
 num_workers: 4
 
-mesh_model_path: "/root/autodl-fs/MM3DAdv_data/3Dmodel/mazda/mazda_part.obj"
+mesh_model_path: "/root/autodl-fs/MM3DAdv_data/3Dmodel/mazda/mazda.obj"
 
-render_face_size : 2  # 面个数
+render_face_size : 3  # 面个数
 target_material_dict :
   - "t1"
   - "t2"
+  - "t3"
   # - "body"
   # - "MAT_Tire_Hub.001"
