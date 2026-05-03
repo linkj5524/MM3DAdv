@@ -77,7 +77,7 @@ if __name__ == '__main__':
 
 
 
-    texture_path=r"/root/autodl-fs/MM3Dadv_exp/attack/yolov8_1/texture/texture_400.pt"
+    texture_path=exp_params["texture_path"]
     attack.validate_adversarial_texture(texture_pt_path= texture_path,
                                         save_visual=True)
 

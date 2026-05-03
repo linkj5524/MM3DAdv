@@ -303,7 +303,7 @@ def load_all_configs():
                         help="model config path")
 
     parser.add_argument('--exp_config_path', type=str, 
-                        default="./configs/exp_config/exp_params.yaml",
+                        default="./configs/exp_config/exp_params_advcat_train.yaml",
                         help="exp config path")
 
     parser.add_argument('--detect_config_path', type=str, 
@@ -353,46 +353,7 @@ if __name__ == '__main__':
                   adv_params=adv_params,
                   detect_params=detect_params)
 
-    imgsize_width=attack.exp_params["image_size"]
-
-    img = cv2.imread(r'./test_imgs/texture.jpg')  # BGR 格式 (H, W, 3)
-    img=cv2.imread(r"./test_imgs/dog.png")
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # 转为 RGB
-    
-    # 2. 调用 Canny 函数
-    canny_tensor = get_canny_edge_tensor(
-        input_image=img,
-        image_resolution=512,
-        num_samples=1,
-        low_threshold=150,
-        high_threshold=240
-    )
 
 
-    # canny_tensor=get_voronoi_canny_edge_tensor(
-    #                 image_resolution=512,
-    #                 num_samples=1,
-    #                 n_seeds=120) 
-
-    if canny_tensor.dim()==3:  # 添加维度
-        canny_tensor = canny_tensor.unsqueeze(0)
-
-    canny_tensor=torch.zeros_like(canny_tensor)  # 全黑图测试
-    # --------------------- 修复：处理 (3,512,512) 维度 ---------------------
-    # 1. 转 numpy
-    canny_np = canny_tensor.squeeze().cpu().detach().numpy()  # 得到 (3,512,512)
-
-    # 2. 关键：把 (3, H, W) → (H, W, 3)，PIL 才能识别
-    canny_np = np.transpose(canny_np, (1, 2, 0))  # 变成 (512,512,3)
-
-    # 3. 归一化到 0~255
-    canny_np = (canny_np - canny_np.min()) / (canny_np.max() - canny_np.min() + 1e-8)
-    canny_np = (canny_np * 255).astype(np.uint8)
-
-    # 4. 转 PIL 图像
-    canny_pil = Image.fromarray(canny_np)
-
-    canny_pil.save("/root/autodl-fs/MM3Dadv_exp/viusal/zero.png")
-
-    attack.generate_adversarial_com(canny_tensor)
+    attack.generate_adversarial_advcat()
 

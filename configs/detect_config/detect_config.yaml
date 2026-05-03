@@ -17,5 +17,5 @@ val_model1:
     model_path: "/root/autodl-fs/models_controlnet_adv/yolo11m.pt"
     model_type: "yolov11"
 attack_model: 
-  model_path: "/root/autodl-fs/models_controlnet_adv/yolov8m.pt"
-  model_type: "yolov8"
+    model_path: "/root/autodl-fs/models_controlnet_adv/yolov8m.pt"
+    model_type: "yolov8"

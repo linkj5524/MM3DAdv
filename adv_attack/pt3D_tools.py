@@ -706,12 +706,12 @@ def load_texture_baked_alpha(map_kd_path, map_d_path, alpha_scalar, device):
 # =========================
 # 3. 主函数
 # =========================
-def load_obj_model_return_mesh_material(obj_path: str, device: torch.device):
+def load_obj_model_return_mesh_material(obj_path: str, device: torch.device,scale=1):
 
     print(f"Loading OBJ: {obj_path}")
 
     verts, faces, aux = load_obj(obj_path, load_textures=True)
-
+    verts = verts/scale
     verts = verts.to(device)
     faces_idx = faces.verts_idx.to(device)
 
@@ -949,6 +949,271 @@ def generate_camera_from_params(
     )
 
     return batch_cameras
+
+
+# def generate_camera_from_params_v2(
+#     cam_relative_pos,
+#     cam_relative_rot,  
+#     device: torch.device,
+#     fov: float = 110.0,  
+#     img_size: tuple = (720, 1280)  # ( height,width)
+# ) -> FoVPerspectiveCameras:  # 修正返回类型：PerspectiveCameras → FoVPerspectiveCameras
+#     """
+#     批量加载位姿文件，生成单个批量相机对象（而非列表）
+#     参数：
+#         pose_paths: 相机位姿文件路径列表
+#         device: 运行设备 (cpu/cuda)
+#         fov: 相机视场角（单位：度），默认110°
+#         img_size: 图像尺寸 (width, height)，默认(720,1280)
+#     返回：
+#         FoVPerspectiveCameras: 批量相机对象（包含len(pose_paths)个相机）
+#     """
+#     # ================= 1 初始化存储列表 =================
+#     R_list = []  # 存储所有相机的旋转矩阵 (3,3)
+#     T_list = []  # 存储所有相机的平移向量 (3,)
+#     H,W=img_size
+#     fov_horizontal_deg = fov
+#     aspect = W / H
+#     fov_h_rad = math.radians(fov_horizontal_deg)
+#     fov_v_rad = math.degrees(2 * math.atan(math.tan(fov_h_rad / 2) / aspect))
+#     # ================= 2 批量加载位姿并计算外参 =================
+#     for pose_path in pose_paths:
+#         # 加载单个位姿文件
+#         pose = load_camera_pose(pose_path)
+#         if pose is None:
+#             raise ValueError(f"位姿文件加载失败：{pose_path}")
+        
+#         # 提取相机位置,#可能要取负号,以calra为准，相机相对车辆原点的坐标（车辆底部的中心）
+#         x, y, z = pose['location']
+        
+#         # 计算俯仰角和方位角（修正坐标系转换）
+#         distance=np.sqrt(x**2 + z**2 + y**2)
+#         pitch_carla = np.degrees(np.arctan2(z, np.sqrt(x**2 + y**2)))
+#         pitch=pitch_carla
+#         # 修正水平角度
+#         yaw_crla = -np.degrees(np.arctan2(y, x))  
+#         yaw=(yaw_crla-90)+180 # 修正坐标系转换，需要注意车辆坐标，carla坐标，opytorch3D坐标
+#         # 生成单个相机的外参
+#         R_single, T_single = look_at_view_transform(
+#             dist=distance,
+#             elev=pitch,
+#             azim=yaw
+#         )
+        
+#         # 转换为tensor并移到指定设备，去除batch维度
+#         R_single = R_single.squeeze(0).to(device)  # (3,3)
+#         T_single = T_single.squeeze(0).to(device)  # (3,)
+        
+#         # 添加到列表
+#         R_list.append(R_single)
+#         T_list.append(T_single)
+
+#     # ================= 3 拼接为批量外参 =================
+#     # 拼接为 (B, 3, 3) 旋转矩阵（B=相机数量）
+#     R_batch = torch.stack(R_list, dim=0)
+#     # 拼接为 (B, 3) 平移向量
+#     T_batch = torch.stack(T_list, dim=0)
+
+#     # ================= 4 生成批量相机对象 =================
+#     batch_cameras = FoVPerspectiveCameras(
+#         device=device,
+#         R=R_batch,                  # 批量旋转矩阵 (B, 3, 3)
+#         T=T_batch,                  # 批量平移向量 (B, 3)
+#         fov=fov_v_rad,                    # 所有相机共用的视场角
+#         znear=0.1,                 # 所有相机共用的近裁剪面
+#         zfar=100.0,                 # 所有相机共用的远裁剪面
+#         # aspect_ratio=img_size[1]/img_size[0],  # 宽高比
+#         # 显式设置图像尺寸，确保和渲染配置匹配
+        
+#     )
+
+#     return batch_cameras
+
+
+
+
+# def generate_camera_from_params_v2(
+#     cam_relative_pos,   # (B,3) or (3,) -> [x, y, z]
+#     cam_relative_rot,   # (B,3) or (3,) -> [pitch, yaw, roll] (deg)
+#     device: torch.device,
+#     fov: float = 110.0,
+#     img_size: tuple = (720, 1280)
+# ) -> FoVPerspectiveCameras:
+
+#     # ===================== 图像参数 =====================
+#     H, W = img_size
+#     aspect = W / H
+
+#     # 水平FOV -> 垂直FOV
+#     fov_h_rad = math.radians(fov)
+#     fov_v_rad = math.degrees(
+#         2 * math.atan(math.tan(fov_h_rad / 2) / aspect)
+#     )
+
+#     # ===================== batch 统一 =====================
+#     if cam_relative_pos.ndim == 1:
+#         cam_relative_pos = cam_relative_pos.unsqueeze(0)
+#     if cam_relative_rot.ndim == 1:
+#         cam_relative_rot = cam_relative_rot.unsqueeze(0)
+
+#     cam_relative_pos = cam_relative_pos.to(device)
+#     cam_relative_rot = cam_relative_rot.to(device)
+
+#     B = cam_relative_pos.shape[0]
+
+#     R_list = []
+#     T_list = []
+
+#     # ===================== 构造外参 =====================
+#     for i in range(B):
+
+#         C = cam_relative_pos[i]  # 相机中心 (x,y,z)
+
+#         pitch_deg, yaw_deg, roll_deg = cam_relative_rot[i]
+
+#         # 角度 -> 弧度
+#         pitch = torch.deg2rad(-pitch_deg)
+#         yaw   = torch.deg2rad(yaw_deg)
+#         roll  = torch.deg2rad(roll_deg)
+
+#         # ===================== 构造旋转矩阵 =====================
+#         # pitch -> X轴
+#         Rx = torch.stack([
+#             torch.stack([torch.tensor(1.0, device=device), torch.tensor(0.0, device=device), torch.tensor(0.0, device=device)]),
+#             torch.stack([torch.tensor(0.0, device=device), torch.cos(pitch), -torch.sin(pitch)]),
+#             torch.stack([torch.tensor(0.0, device=device), torch.sin(pitch),  torch.cos(pitch)])
+#         ])
+
+#         # yaw -> Y轴
+#         Ry = torch.stack([
+#             torch.stack([ torch.cos(yaw), torch.tensor(0.0, device=device), torch.sin(yaw)]),
+#             torch.stack([ torch.tensor(0.0, device=device), torch.tensor(1.0, device=device), torch.tensor(0.0, device=device)]),
+#             torch.stack([-torch.sin(yaw), torch.tensor(0.0, device=device), torch.cos(yaw)])
+#         ])
+
+#         # roll -> Z轴
+#         Rz = torch.stack([
+#             torch.stack([torch.cos(roll), -torch.sin(roll), torch.tensor(0.0, device=device)]),
+#             torch.stack([torch.sin(roll),  torch.cos(roll), torch.tensor(0.0, device=device)]),
+#             torch.stack([torch.tensor(0.0, device=device), torch.tensor(0.0, device=device), torch.tensor(1.0, device=device)])
+#         ])
+
+#         # ===================== XYZ 顺序 =====================
+#         R = Rx @ Ry @ Rz
+
+#         # ===================== 外参 =====================
+#         T = -R @ C
+
+#         R_list.append(R)
+#         T_list.append(T)
+
+#     R_batch = torch.stack(R_list, dim=0)   # (B,3,3)
+#     T_batch = torch.stack(T_list, dim=0)   # (B,3)
+
+#     # ===================== 正交化（防数值误差） =====================
+#     try:
+#         U, _, V = torch.linalg.svd(R_batch)
+#         R_batch = torch.bmm(U, V.transpose(1, 2))
+#     except:
+#         pass
+
+#     # ===================== 构建相机 =====================
+#     cameras = FoVPerspectiveCameras(
+#         device=device,
+#         R=R_batch,
+#         T=T_batch,
+#         fov=fov_v_rad,
+#         znear=0.1,
+#         zfar=100.0,
+#         aspect_ratio=aspect,
+#     )
+
+#     return cameras
+
+
+def generate_camera_from_params_v2(
+    cam_relative_pos,   # (B,3) or (3,)
+    cam_relative_rot,   # 已不再使用（保留接口）
+    device: torch.device,
+    fov: float = 90,
+    img_size: tuple = (512, 512)
+) -> FoVPerspectiveCameras:
+
+    # ===================== 图像参数 =====================
+    H, W = img_size
+    aspect = W / H
+
+    fov_h_rad = math.radians(fov)
+    fov_v_rad = math.degrees(
+        2 * math.atan(math.tan(fov_h_rad / 2) / aspect)
+    )
+
+    # ===================== batch 统一 =====================
+    if cam_relative_pos.ndim == 1:
+        cam_relative_pos = cam_relative_pos.unsqueeze(0)
+
+    cam_relative_pos = cam_relative_pos.to(device)
+
+    B = cam_relative_pos.shape[0]
+
+    R_list = []
+    T_list = []
+
+    # ===================== look-at 构造 =====================
+    for i in range(B):
+
+        x, y, z = cam_relative_pos[i]
+        
+        x = x.detach().cpu().item()
+        y = y.detach().cpu().item()
+        z = z.detach().cpu().item()
+
+        # 计算俯仰角和方位角（修正坐标系转换）
+        distance=np.sqrt(x**2 + z**2 + y**2)
+        pitch_carla = np.degrees(np.arctan2(z, np.sqrt(x**2 + y**2)))
+        pitch=pitch_carla
+        # 修正水平角度
+        yaw = 180-np.degrees(np.arctan2(x, y))
+        print(yaw)
+        # yaw_crla = -np.degrees(np.arctan2(y, x))  
+        # yaw=(yaw-90)+180 # 修正坐标系转换，需要注意车辆坐标，carla坐标，opytorch3D坐标
+        # 生成单个相机的外参
+        R_single, T_single = look_at_view_transform(
+            dist=distance,
+            elev=pitch,
+            azim=yaw
+        )
+        
+        # 转换为tensor并移到指定设备，去除batch维度
+        R_single = R_single.squeeze(0).to(device)  # (3,3)
+        T_single = T_single.squeeze(0).to(device)  # (3,)
+        
+        # 添加到列表
+        R_list.append(R_single)
+        T_list.append(T_single)
+
+    # ================= 3 拼接为批量外参 =================
+    # 拼接为 (B, 3, 3) 旋转矩阵（B=相机数量）
+    R_batch = torch.stack(R_list, dim=0)
+    # 拼接为 (B, 3) 平移向量
+    T_batch = torch.stack(T_list, dim=0)
+
+    # ================= 4 生成批量相机对象 =================
+    batch_cameras = FoVPerspectiveCameras(
+        device=device,
+        R=R_batch,                  # 批量旋转矩阵 (B, 3, 3)
+        T=T_batch,                  # 批量平移向量 (B, 3)
+        fov=fov_v_rad,                    # 所有相机共用的视场角
+        znear=0.1,                 # 所有相机共用的近裁剪面
+        zfar=100.0,                 # 所有相机共用的远裁剪面
+        # aspect_ratio=img_size[1]/img_size[0],  # 宽高比
+        # 显式设置图像尺寸，确保和渲染配置匹配
+        
+    )
+
+    return batch_cameras
+
+
 def camera_generate_fixed(device):
         # --------------------------------
     # 2 设置相机
@@ -1348,6 +1613,60 @@ def load_parma_and_render_main(
 
     return rendered_image_tensor,mask
 
+# 输入camer参数，得路径
+def load_parma_and_render_main_v2(
+    object_mesh,   #  List[Meshes]
+    background,
+    cam_relative_pos,
+    cam_relative_rot,
+    image_size,
+
+    device,
+    fov=110,
+    blur_radius=0.0,
+    
+    faces_per_pixel=1
+):
+    """
+    支持多材质 mesh 渲染
+    """
+
+    # ================= 相机 =================
+    cameras = generate_camera_from_params_v2(
+        cam_relative_pos=cam_relative_pos,
+        cam_relative_rot=cam_relative_rot,
+        device=device,
+        fov=fov,
+        img_size=image_size
+    )
+
+    # ================= 光照 =================
+    light = light_set_fixed(device)
+
+    # ================= raster =================
+    raster_settings = RasterizationSettings(
+        image_size=image_size,
+        blur_radius=blur_radius,
+        faces_per_pixel=faces_per_pixel,
+        bin_size=0
+    )
+
+    # ================= 渲染 =================
+    image_tensor,images_depth = render_process(
+        cameras=cameras,
+        raster_settings=raster_settings,
+        lights=light,
+        meshes_list=object_mesh,  # 
+        device=device
+    )
+
+    rendered_image_tensor,mask=compose_with_background(image_tensor,images_depth,background)
+
+    # ================= debug =================
+    visualize_and_save_render(image_tensor,save_dir="./exp/debug_results/2")
+    visualize_and_save_render(rendered_image_tensor, save_dir="./exp/debug_results/1")
+
+    return rendered_image_tensor,mask
 
 
 

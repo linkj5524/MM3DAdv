@@ -1,0 +1,70 @@
+# config/attack_config.yaml
+
+
+image_size : 512 
+
+render_size:
+  width: 512
+  height: 512
+device: "cuda"  
+# optim params
+optim_epochs: 1
+lr: 0.05     #0.05   
+lr_step: 500 # 10  ,按迭代次数算
+lr_decay: 0.8
+
+
+ 
+# amp_status: true 
+use_amp : false
+use_bf16 : true 
+
+
+adv_loss_type: 1   
+
+# 0:表示与gt的交叉熵最大；
+# 1:表示最小化当前预测类别的置信度；
+# 2：带有参考类型，最大化误导类别的置信度，最小化当前类别的置信度
+optim_object_type: 0
+# 0 表示优化latent
+# 1 表示直接优化RGB图片
+# 2 表示经过VAE，优化RGB图像
+
+target_class: 2 # 目标类别，参考COCO类别对应,参考类别
+
+
+
+
+TV_loss_weight: 0.01
+conext_loss_weight: 1 ## 默认 1：1000 默认2：2000
+perceptual_loss_weight: 2 ## 默认1： 1000 默认2：1000
+class_loss_weight : 1  # 1  
+HUV_loss_weight : 5
+
+experiment_path: "/root/autodl-fs/MM3Dadv_exp/attack/debug"
+
+
+
+dataloader:
+  target: dataload.DualAttentionAttack_loader.MyDataset
+  params:
+    data_dir: /root/autodl-fs/data_debug/cmp_debug/phy_attack
+    img_size: 512
+    mask_dir: /root/autodl-fs/data_debug/cmp_debug/masks
+
+
+batch_size: 1
+num_workers: 4
+
+texture_save_interval: 100
+
+
+mesh_model_path: "/root/autodl-fs/MM3DAdv_data/3Dmodel/audi/audi_et_te.obj"
+
+render_face_size : 1  # 面个数
+target_material_dict :
+  - "MI_CarExterior_Etron"
+
+
+  # - "body"
+  # - "MAT_Tire_Hub.001"

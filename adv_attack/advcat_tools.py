@@ -188,33 +188,74 @@ def drawcircles_fix_color(original_circles, coordinates, colors, fig_size_h, fig
     return color_map
 
 
-def prob_fix_color(original_circles, coordinates, colors, fig_size_h, fig_size_w,blur=1):
+# def prob_fix_color(original_circles, coordinates, colors, fig_size_h, fig_size_w,blur=1):
+#     assert original_circles.shape[0] == colors.shape[0]
+#     coordinates = coordinates.expand(original_circles.shape[1],-1,-1,-1).permute(1,2,0,3)
+#     # circles = original_circles * fig_size_h
+#     circle0 = original_circles[...,0]*fig_size_h
+#     circle1 = original_circles[...,1]*fig_size_w
+#     circles = torch.stack([circle0,circle1],dim=-1)
+#     dist_sum = torch.zeros([colors.shape[0],fig_size_h,fig_size_w]).to(coordinates.device)
+#     for color_idx in range(colors.shape[0]):
+#         dist = torch.norm(coordinates-circles[color_idx,:,:2],dim=-1)
+#         # dist = torch.norm(coordinates-circles[color_idx,:,:2],dim=-1)
+#         # dist = dist / (circles[color_idx,:,2]+1)
+#         dist_sum[color_idx] = torch.exp(-dist/blur).sum(dim=-1)
+#         # print(dist_sum[color_idx])
+#     # print(dist_sum[0])
+#     dist_sum = dist_sum/dist_sum.sum(dim=0)
+#     return dist_sum
+
+def prob_fix_color(original_circles, coordinates, colors, fig_size_h, fig_size_w, blur=1):
     assert original_circles.shape[0] == colors.shape[0]
-    coordinates = coordinates.expand(original_circles.shape[1],-1,-1,-1).permute(1,2,0,3)
-    # circles = original_circles * fig_size_h
-    circle0 = original_circles[...,0]*fig_size_h
-    circle1 = original_circles[...,1]*fig_size_w
-    circles = torch.stack([circle0,circle1],dim=-1)
-    dist_sum = torch.zeros([colors.shape[0],fig_size_h,fig_size_w]).to(coordinates.device)
+    coordinates = coordinates.expand(original_circles.shape[1], -1, -1, -1).permute(1, 2, 0, 3)
+    
+    # 安全处理尺寸缩放
+    circle0 = original_circles[..., 0] * fig_size_h
+    circle1 = original_circles[..., 1] * fig_size_w
+    circles = torch.stack([circle0, circle1], dim=-1)
+    
+    dist_sum = torch.zeros([colors.shape[0], fig_size_h, fig_size_w], device=coordinates.device)
+    
     for color_idx in range(colors.shape[0]):
-        dist = torch.norm(coordinates-circles[color_idx,:,:2],dim=-1)
-        # dist = torch.norm(coordinates-circles[color_idx,:,:2],dim=-1)
-        # dist = dist / (circles[color_idx,:,2]+1)
-        dist_sum[color_idx] = torch.exp(-dist/blur).sum(dim=-1)
-        # print(dist_sum[color_idx])
-    # print(dist_sum[0])
-    dist_sum = dist_sum/dist_sum.sum(dim=0)
+        dist = torch.norm(coordinates - circles[color_idx, :, :2], dim=-1)
+        dist_sum[color_idx] = torch.exp(-dist / blur).sum(dim=-1)
+    
+    #  核心修复：防止分母为 0，加极小值 eps
+    sum_dist = dist_sum.sum(dim=0)
+    eps = 1e-6
+    sum_dist = torch.clamp(sum_dist, min=eps)  # 保证分母永远 >= eps
+    
+    # 归一化，永远不会出现 NaN
+    dist_sum = dist_sum / sum_dist
+    
     return dist_sum
 
+# def gumbel_color_fix_seed(prob_map, seed, color, tau=0.3, type='gumbel'):
+#     # print(prob_map.shape, seed.shape, color.shape)
+#     if type == 'gumbel':
+#         color_map = F.softmax((torch.log(prob_map) + seed)/tau, dim=-1)
+#     elif type == 'determinate':
+#         color_ind = (torch.log(prob_map) + seed).max(-1)[1]
+#         color_map = F.one_hot(color_ind, prob_map.shape[-1]).to(prob_map)
+#     else:
+#         raise ValueError
+#     tex = torch.matmul(color_map, color).unsqueeze(0)
+#     return tex
 def gumbel_color_fix_seed(prob_map, seed, color, tau=0.3, type='gumbel'):
-    # print(prob_map.shape, seed.shape, color.shape)
+    #  核心修复：把 prob_map 钳到极小值，防止 log(0) = -inf
+    prob_map = torch.clamp(prob_map, min=1e-6, max=1.0)
+    
+    logits = torch.log(prob_map) + seed
+
     if type == 'gumbel':
-        color_map = F.softmax((torch.log(prob_map) + seed)/tau, dim=-1)
+        color_map = F.softmax(logits / tau, dim=-1)
     elif type == 'determinate':
-        color_ind = (torch.log(prob_map) + seed).max(-1)[1]
+        color_ind = logits.max(-1)[1]
         color_map = F.one_hot(color_ind, prob_map.shape[-1]).to(prob_map)
     else:
-        raise ValueError
+        raise ValueError(f"Unknown type: {type}")
+    
     tex = torch.matmul(color_map, color).unsqueeze(0)
     return tex
 
@@ -228,8 +269,45 @@ def ctrl_loss(circles, fig_h, fig_w, sigma=40):
         
 
 # colortransform
+# class TotalVariation(nn.Module):
+#     """计算 Total Variation Loss，和你代码里的 TV 完全对应"""
+#     def __init__(self):
+#         super().__init__()
 
+#     def forward(self, x):
+#         """
+#         x: (1, H, W, 3)  你的纹理格式
+#         """
+#         h_diff = x[:, 1:, :, :] - x[:, :-1, :, :]
+#         w_diff = x[:, :, 1:, :] - x[:, :, :-1, :]
+#         diff_sum = torch.sum(torch.abs(h_diff)) + torch.sum(torch.abs(w_diff))
+#         return diff_sum
 
+class TotalVariation(nn.Module):
+    """计算 Total Variation Loss，和你代码里的 TV 完全对应，修正求和逻辑"""
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        """
+        x: (1, H, W, 3)  你的纹理格式
+        """
+        h_diff = x[:, 1:, :, :] - x[:, :-1, :, :]  # shape: (1, H-1, W, 3)
+        w_diff = x[:, :, 1:, :] - x[:, :, :-1, :]  # shape: (1, H, W-1, 3)
+        
+        # 修正1：逐通道计算L1范数之和，再对通道求和（遵循TV损失逻辑）
+        h_loss = torch.sum(torch.abs(h_diff), dim=[1, 2])  # 对H-1、W维度求和，保留通道维度 (1, 3)
+        w_loss = torch.sum(torch.abs(w_diff), dim=[1, 2])  # 对H、W-1维度求和，保留通道维度 (1, 3)
+        channel_sum = torch.sum(h_loss + w_loss, dim=1)  # 对3个通道求和，得到每个batch的损失 (1,)
+        
+        # 修正2：归一化（除以差异总数，避免尺寸影响，约束力度稳定）
+        # 差异总数 = 垂直差异数（(H-1)*W*3） + 水平差异数（H*(W-1)*3）
+        batch_size, H, W, C = x.shape
+        total_diff = (H - 1) * W * C + H * (W - 1) * C
+        tv_loss = channel_sum / total_diff/batch_size  # 归一化后，损失值稳定在合理范围
+        
+        return tv_loss
+    
 class ColorTransform(nn.Module):
     def __init__(self, para_path):
         super(ColorTransform, self).__init__()
@@ -266,71 +344,357 @@ class ColorTransform(nn.Module):
         pred = pred.transpose(1, -1)
         return pred
     
+def reg_dist(x, dist='uniform', mode='cf', sample_num=200):
+    i = 1
+    t = x.new(size=[sample_num]).normal_()
 
 
+    if dist == 'uniform':
+        t_abs = t.abs()
+        f_real = torch.sin(i * t_abs) / (t_abs + 1e-10)
+        f_img = 2 * torch.sin(i * t_abs / 2).square() / (t_abs + 1e-10) * t.sign()
+    else:
+        raise NotImplementedError
+
+    #     estimate f
+    f_e_real = 1 / x.shape[-1] * torch.cos(t.unsqueeze(-1)*x.unsqueeze(-2)).sum(-1)
+    f_e_img = 1 / x.shape[-1] * torch.sin(t.unsqueeze(-1)*x.unsqueeze(-2)).sum(-1)
+
+    diff = (f_real - f_e_real)*(f_real - f_e_real) + (f_img - f_e_img)*(f_img - f_e_img)
+    diff = diff  / (t * t + 1e-10) / (-t * t / 2).exp()
+    diff = diff.sum(-1) / sample_num
+    return diff
+
+# def compute_regularization_losses(tex_dict, seeds_train_dict=None):
+#     """
+#     不依赖 args，内部写死所有超参数
+#     """
+
+#     # ===== 固定超参数 =====
+#     TV_WEIGHT = 0.0
+#     CTRL_WEIGHT = 1.0
+#     SEED_WEIGHT = 0.0
+#     RD_NUM = 200
+
+#     device = next(iter(tex_dict.values()))['tex'].device
+
+#     loss_tv = torch.zeros([], device=device)
+#     loss_ctrl = torch.zeros([], device=device)
+#     loss_seed = torch.zeros([], device=device)
+
+#     tv_fn = TotalVariation()
+
+#     num_mat = len(tex_dict)
+
+#     for mat in tex_dict:
+#         tex = tex_dict[mat]['tex']              # (1,H,W,3)
+#         pointd = tex_dict[mat]['pointd']        # (C,N,3)
+#         coords = tex_dict[mat]['coordinates']   # (H,W,2)
+
+#         H, W = coords.shape[:2]
+
+#         # ===== TV loss =====
+#         if TV_WEIGHT > 0:
+#             loss_tv += tv_fn(tex)
+
+#         # ===== ctrl loss =====
+#         if CTRL_WEIGHT > 0:
+#             loss_ctrl += ctrl_loss(pointd, H, W)
+
+#         # ===== seed loss =====
+#         if SEED_WEIGHT > 0 and seeds_train_dict is not None:
+#             seeds = seeds_train_dict[mat]
+#             loss_seed += reg_dist(
+#                 seeds.flatten(),
+#                 sample_num=RD_NUM
+#             )
+
+#     # ===== 可选：防止材质数量影响loss尺度 =====
+#     loss_tv /= num_mat
+#     loss_ctrl /= num_mat
+#     loss_seed /= num_mat
+
+#     # ===== 加权 =====
+#     loss_tv *= TV_WEIGHT
+#     loss_ctrl *= CTRL_WEIGHT
+#     loss_seed *= SEED_WEIGHT
+
+#     loss_total = loss_tv + loss_ctrl + loss_seed
+
+#     return loss_total, {
+#         "tv_loss": loss_tv.detach(),
+#         "ctrl_loss": loss_ctrl.detach(),
+#         "seed_loss": loss_seed.detach(),
+#         "reg_total": loss_total.detach()
+#     }
+
+
+def compute_regularization_losses(tex_dict, seeds_train_dict=None):
+    """
+    不依赖 args，内部写死所有超参数
+    修复：全程保留计算图，仅日志信息 detach，不影响梯度回传
+    """
+
+    # ===== 固定超参数 =====
+    TV_WEIGHT = 0.1
+    CTRL_WEIGHT = 1.0
+    SEED_WEIGHT = 0.0
+    RD_NUM = 200
+
+    device = next(iter(tex_dict.values()))['tex'].device
+
+    # 初始化带有梯度追踪属性的标量 0
+    loss_tv = torch.tensor(0.0, device=device, requires_grad=True)
+    loss_ctrl = torch.tensor(0.0, device=device, requires_grad=True)
+    loss_seed = torch.tensor(0.0, device=device, requires_grad=True)
+
+    tv_fn = TotalVariation()
+
+    num_mat = len(tex_dict)
+
+    for mat in tex_dict:
+        tex = tex_dict[mat]['tex']              # (1,H,W,3)
+        pointd = tex_dict[mat]['pointd']        # (C,N,3)
+        coords = tex_dict[mat]['coordinates']   # (H,W,2)
+
+        H, W = coords.shape[:2]
+
+        # ===== TV loss =====
+        if TV_WEIGHT > 0:
+            loss_tv = loss_tv + tv_fn(tex)  # 不用 +=，更稳定
+
+        # ===== ctrl loss =====
+        if CTRL_WEIGHT > 0:
+            loss_ctrl = loss_ctrl + ctrl_loss(pointd, H, W)
+
+        # ===== seed loss =====
+        if SEED_WEIGHT > 0 and seeds_train_dict is not None:
+            seeds = seeds_train_dict[mat]
+            loss_seed = loss_seed + reg_dist(
+                seeds.flatten(),
+                sample_num=RD_NUM
+            )
+
+    # ===== 平均（保持计算图）=====
+    loss_tv = loss_tv / num_mat
+    loss_ctrl = loss_ctrl / num_mat
+    loss_seed = loss_seed / num_mat
+
+    # ===== 加权（保持计算图）=====
+    loss_tv = loss_tv * TV_WEIGHT
+    loss_ctrl = loss_ctrl * CTRL_WEIGHT
+    loss_seed = loss_seed * SEED_WEIGHT
+
+    # 总损失（可直接用于反向传播）
+    loss_total = loss_tv + loss_ctrl + loss_seed
+
+    # ========== 关键修复：只在返回日志时 detach ==========
+    return loss_total, {
+        "tv_loss": loss_tv,        # 仅日
+        "ctrl_loss": loss_ctrl,    # 仅日志
+        "seed_loss": loss_seed,    # 仅日志
+        "reg_total": loss_total    # 仅日志
+    }
 
 class advcat_attack(object):
-    def __init__(self,device,target_material_list,image_size,num_points):
+    def __init__(self, device, target_material_list, image_size, num_points,
+                 lr=1e-2, lr_seed=1e-2, clamp_shift=0.1):
+        self.clamp_shift = clamp_shift
+        # ===== 基础 =====
+        self.device = device
+        self.tex_dict = {}   
 
-        
-        self.tv_loss = TotalVariation()
-
-
-
-        color_transform = ColorTransform('color_transform_dim6.npz')
+        color_transform = ColorTransform('/root/autodl-tmp/adv_method/MM3DAdv/needed_data/color_transform_dim6.npz')
         self.color_transform = color_transform.to(device)
 
-
-
-        # resolution = 4
-        # h, w, h_t, w_t = int(self.fig_size_H / resolution), int(self.fig_size_W / resolution), int(self.fig_size_H_t / resolution), int(self.fig_size_W_t / resolution)
-        # self.h, self.w, self.h_t, self.w_t = h, w, h_t, w_t
         num_colors = 4
+        h, w = image_size
 
-        h,w=image_size
+        # ===== 材质参数 =====
+        optim_params = []
+        
         for key_material in target_material_list:
-            self.tex_dict[key_material]={}
-            self.tex_dict[key_material]['coordinates']=torch.stack(torch.meshgrid(torch.arange(h), torch.arange(w)), -1).to(device)
-            self.tex_dict[key_material]['pointd']=torch.rand([num_colors, num_points, 3], requires_grad=True, device=device)
+            self.tex_dict[key_material] = {}
 
-        self.colors = torch.load("data/camouflage4.pth").float().to(device)
+            # 坐标
+            self.tex_dict[key_material]['coordinates'] = torch.stack(
+                torch.meshgrid(
+                    torch.arange(h, device=device),
+                    torch.arange(w, device=device),
+                    indexing='ij'   # 
+                ), -1
+            )
 
+            # 可学习点
+            pointd = torch.rand(
+                [num_colors, num_points, 3],
+                device=device,
+                requires_grad=True
+            )
+            self.tex_dict[key_material]['pointd'] = pointd
 
-        self.optimizer = torch.optim.Adam([self.tshirt_point, self.trouser_point], lr=lr)
+            optim_params.append(pointd)  # ✅ 收集到优化器
 
+        self.colors = torch.tensor([
+                [0.12, 0.25, 0.10],  # 深墨绿
+                [0.22, 0.38, 0.18],  # 草绿色
+                [0.35, 0.42, 0.25],  # 橄榄黄
+                [0.08, 0.15, 0.08]   # 暗墨绿色
+            ], dtype=torch.float32, device=self.device)
 
-        self.seeds_tshirt_train = torch.zeros(size=[h, w, num_colors], device=device).uniform_(clamp_shift,
-                                                                                            1 - clamp_shift).requires_grad_()  # NOTE when not fixed we use uniform
-        self.seeds_trouser_train = torch.zeros(size=[h, w, num_colors], device=device).uniform_(clamp_shift,
-                                                                                                1 - clamp_shift).requires_grad_()
+        # ===== 优化器（点）=====
+        self.optimizer = torch.optim.Adam(optim_params, lr=lr)
 
-        self.seeds_tshirt_fixed = torch.zeros(size=[h, w, num_colors], device=device).uniform_()
-        self.seeds_trouser_fixed = torch.zeros(size=[h, w, num_colors], device=device).uniform_()
+        # ===== seeds（多材质版本）=====
+        self.seeds_train = {}
+        self.seeds_fixed = {}
 
+        seed_params = []
 
-        self.optimizer_seed = torch.optim.Adam([self.seeds_tshirt_train, self.seeds_trouser_train], lr=lr_seed)
+        for key_material in target_material_list:
+            seeds_train = torch.zeros(
+                size=[h, w, num_colors],
+                device=device
+            ).uniform_(clamp_shift, 1 - clamp_shift).requires_grad_()
 
+            seeds_fixed = torch.zeros(
+                size=[h, w, num_colors],
+                device=device
+            ).uniform_()
 
+            self.seeds_train[key_material] = seeds_train
+            self.seeds_fixed[key_material] = seeds_fixed
+
+            seed_params.append(seeds_train)
+
+        # ===== 优化器（seed）=====
+        self.optimizer_seed = torch.optim.Adam(seed_params, lr=lr_seed)
+
+        # ===== 平滑卷积核 =====
         k = 3
         k2 = k * k
-        self.camouflage_kernel = nn.Conv2d(num_colors, num_colors, k, 1, int(k / 2)).to(device)
-        self.camouflage_kernel.weight.data.fill_(0)
-        self.camouflage_kernel.bias.data.fill_(0)
+        self.camouflage_kernel = nn.Conv2d(
+            num_colors, num_colors, k, 1, k // 2
+        ).to(device)
+
+        self.camouflage_kernel.weight.data.zero_()
+        self.camouflage_kernel.bias.data.zero_()
+
         for i in range(num_colors):
-            self.camouflage_kernel.weight[i, i, :, :].data.fill_(1 / k2)
+            self.camouflage_kernel.weight[i, i, :, :].data.fill_(1.0 / k2)
 
 
-    def update_mesh(self, tau=0.3, type='gumbel'):
-        # camouflage:
-        for key_material in self.target_material_list:
-            prob_map = prob_fix_color(self.tex_dict[key_material]['pointd'], self.tex_dict[key_material]['coordinates'], self.colors, self.h, self.w, blur=self.args.blur).unsqueeze(0)
+    def update_mesh(self, tau=0.3, type='gumbel', blur=1):
+        """
+        多材质版本 update_mesh
+        输出写入 self.tex_dict[material]['tex']
+        """
+
+        for key_material in self.tex_dict:
+
+            # ===== 取参数 =====
+            pointd = self.tex_dict[key_material]['pointd']
+            coords = self.tex_dict[key_material]['coordinates']
+            seeds  = self.seeds_train[key_material]
+
+            h, w = coords.shape[:2]
+
+            # ===== prob map =====
+            prob_map = prob_fix_color(
+                pointd,
+                coords,
+                self.colors,
+                h,
+                w,
+                blur=blur
+            ).unsqueeze(0)   # (1, C, H, W)
+
             prob_map = self.camouflage_kernel(prob_map)
-            prob_map = prob_map.squeeze(0).permute(1, 2, 0)
-            gb = -(-(self.seed + 1e-20).log() + 1e-20).log()
-            tex = gumbel_color_fix_seed(prob_map, gb, self.colors, tau=tau, type=type)
-            self.tex_dict[key_material]['tex'] = self.color_transform(tex.permute(0, 3, 1, 2)).permute(0, 2, 3, 1)
+
+            prob_map = prob_map.squeeze(0).permute(1, 2, 0)  # (H, W, C)
+            prob_map = torch.clamp(prob_map, min=1e-6, max=1.0)
+            # ===== Gumbel noise =====
+            gb = -(-(seeds + 1e-20).log() + 1e-20).log()
+
+            # ===== 采样颜色 =====
+            tex = gumbel_color_fix_seed(
+                prob_map,
+                gb,
+                self.colors,
+                tau=tau,
+                type=type
+            )  # (1, H, W, 3)
+
+            # ===== 颜色空间变换 =====
+            tex = self.color_transform(
+                tex.permute(0, 3, 1, 2)
+            ).permute(0, 2, 3, 1)
+
+            # ===== 写回 =====
+            self.tex_dict[key_material]['tex'] = tex
 
         return self.tex_dict
+
+
+
+    def step(self, det_loss, tau=0.3, type='gumbel', blur=1):
+        """
+        det_loss: 外部传入的检测对抗损失（模型前向得到的攻击损失）
+        return: 总损失、各分项损失字典
+        """
+        # 1. 清空所有优化器梯度
+        self.optimizer.zero_grad()
+        self.optimizer_seed.zero_grad()
+
+        # # 2. 前向：更新生成最新材质纹理
+        # self.update_mesh(tau=tau, type=type, blur=blur)
+
+        # 3. 计算所有正则化损失
+        loss_reg, loss_info = compute_regularization_losses(
+            tex_dict=self.tex_dict,
+            seeds_train_dict=self.seeds_train
+        )
+        loss_tv = loss_info['tv_loss']
+        loss_ctrl = loss_info['ctrl_loss']
+        loss_seed = loss_info['seed_loss']
+
+        # 4. 计算加权总损失 = 对抗损失 + 加权正则损失
+        total_loss = self.weight_det * det_loss +loss_reg 
+
+        # 5. 反向传播 计算所有变量梯度
+        total_loss.backward()
+
+        # 6. 第一步：优化 可学习点参数 pointd
+        self.optimizer.step()
+
+        # 7. 第二步：优化 可学习种子 seeds_train（完全对齐原版代码逻辑）
+        # seed梯度缩放
+        for mat in self.seeds_train:
+            self.seeds_train[mat].grad /= self.seed_temp
+        self.optimizer_seed.step()
+
+        # 8. 参数值域裁剪（严格原版规则）
+        # 1）材质控制点 pointd 限制 [0, 1]
+        for mat in self.tex_dict:
+            self.tex_dict[mat]['pointd'].data.clamp_(0.0, 1.0)
+        # 2）颜色参数裁剪
+        self.colors.data.clamp_(0.0, 1.0)
+        # 3）训练种子限制边界
+        for mat in self.seeds_train:
+            self.seeds_train[mat].data.clamp_(self.clamp_shift, 1.0 - self.clamp_shift)
+
+        # 返回所有损失值，方便打印、日志记录
+        loss_all = {
+            "det_loss": det_loss.detach(),
+            "tv_loss": loss_tv,
+            "ctrl_loss": loss_ctrl,
+            "seed_loss": loss_seed,
+            "reg_total": loss_reg.detach(),
+            "total_loss": total_loss.detach()
+        }
+        return total_loss.item(), loss_all
+
+
 
 
 

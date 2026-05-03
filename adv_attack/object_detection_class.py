@@ -500,7 +500,7 @@ class ObjectDetection:
         else:
             raise ValueError(f"不支持的模型类型: {model_type}")
 
-    @torch.no_grad()
+
     def detect_eval(self, images: torch.Tensor, model_type: str,file_path: Optional[str] = None,file_name='detect.jpg',grad_status=True):
         """
         执行检测并返回统一格式的结果

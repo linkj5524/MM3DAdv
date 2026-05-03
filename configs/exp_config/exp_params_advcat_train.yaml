@@ -41,7 +41,7 @@ perceptual_loss_weight: 2 ## 默认1： 1000 默认2：1000
 class_loss_weight : 1  # 1  
 HUV_loss_weight : 5
 
-experiment_path: "/root/autodl-fs/MM3Dadv_exp/viusal"
+experiment_path: "/root/autodl-fs/MM3Dadv_exp/attack/compare_method/advcat/yolov8"
 
 
 # dataloader:
