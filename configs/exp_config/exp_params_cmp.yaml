@@ -59,7 +59,7 @@ num_workers: 4
 texture_save_interval: 100
 
 
-mesh_model_path: "/root/autodl-fs/MM3DAdv_data/3Dmodel/audi/audi_et_te.obj"
+mesh_model_path: "/root/autodl-fs/MM3DAdv_data/3Dmodel/audi/audi_et_te_origin.obj"
 
 render_face_size : 1  # 面个数
 target_material_dict :

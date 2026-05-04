@@ -46,7 +46,7 @@ class MyDataset(Dataset):
                 cam_trans[0][0] += veh_trans[0][0]
                 cam_trans[0][1] += veh_trans[0][1]
                 cam_trans[0][2] += veh_trans[0][2]
-                veh_trans[0][2] += 0.2
+                # veh_trans[0][2] += 0.2
 
                 dis = (cam_trans - veh_trans)[0, :]
                 dis = np.sum(dis ** 2)
@@ -56,7 +56,7 @@ class MyDataset(Dataset):
         print("有效样本数量:", len(self.files))
         self.img_size = img_size
         self.mask_dir = mask_dir
-        self.scale = 0.41 # CARLA -> 渲染器 固定缩放，0.41
+        self.scale = 1 # CARLA -> 渲染器 固定缩放，0.41
 
     # def __getitem__(self, index):
     #     file = os.path.join(self.data_dir, self.files[index])
@@ -218,7 +218,7 @@ class MyDataset(Dataset):
 
 
         rel_pos = cam_trans[0]
-        rel_pos[2] += 0.2  # 车辆抬高 0.2m
+        # rel_pos[2] -= 0.2  # 车辆抬高 0.2m
         # ====================== 世界 → 车坐标 ======================
 
         veh_pitch   = math.radians(veh_trans[1][0])

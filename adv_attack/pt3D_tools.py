@@ -873,6 +873,191 @@ def load_obj_model_return_mesh_material(obj_path: str, device: torch.device,scal
 
     return meshes_list, material_names_list
 
+
+def load_obj_model_return_mesh_material_v1(obj_path: str, device: torch.device,scale=1):
+
+    print(f"Loading OBJ: {obj_path}")
+
+    verts, faces, aux = load_obj(obj_path, load_textures=True)
+    verts = verts / scale
+    verts = verts.to(device)
+
+    # ===== 绕 X 轴旋转 =====
+    theta = math.radians(-90)  # 根据需要调整角度
+
+    Rx = torch.tensor([
+        [1, 0, 0],
+        [0, math.cos(theta), -math.sin(theta)],
+        [0, math.sin(theta),  math.cos(theta)]
+    ], dtype=torch.float32, device=device)
+
+    verts = torch.matmul(verts, Rx.T)
+
+    # ===== 再做平移 =====
+    verts[:, 1] -= (0.649/2) 
+
+
+    faces_idx = faces.verts_idx.to(device)
+
+    has_uv = (
+        aux.verts_uvs is not None
+        and faces.textures_idx is not None
+        and len(aux.verts_uvs) > 0
+    )
+
+    print("OBJ检测:")
+    print("verts_uvs:", None if aux.verts_uvs is None else aux.verts_uvs.shape)
+    print("faces_uvs:", None if faces.textures_idx is None else faces.textures_idx.shape)
+    print("materials:", list(aux.material_colors.keys()) if aux.material_colors else None)
+
+    # ===== 解析 MTL =====
+    mtl_path = obj_path.replace(".obj", ".mtl")
+    mtl_data = parse_mtl(mtl_path)
+
+    material_names = list(aux.material_colors.keys()) if aux.material_colors else []
+
+    meshes_list = []
+    material_names_list = []
+
+    for mat_idx in faces.materials_idx.unique().tolist():
+
+        mat_name = material_names[mat_idx] if mat_idx < len(material_names) else None
+
+        face_mask = (faces.materials_idx == mat_idx)
+        face_indices = face_mask.nonzero(as_tuple=True)[0]
+
+        current_faces_idx = faces_idx[face_indices]
+
+        current_faces_uvs = (
+            faces.textures_idx[face_indices].to(device) if has_uv else None
+        )
+
+        current_verts_uvs = aux.verts_uvs.to(device) if has_uv else None
+
+        # =========================
+        # 有 UV：优先走 texture
+        # =========================
+        if has_uv:
+
+            mtl_info = mtl_data.get(mat_name, {})
+
+            map_kd = mtl_info.get("map_Kd", None)
+            map_d = mtl_info.get("map_d", None)
+            alpha_scalar = mtl_info.get("alpha", 1.0)
+
+            if map_kd is not None:
+                map_kd = os.path.join(os.path.dirname(obj_path), map_kd)
+
+            if map_d is not None:
+                map_d = os.path.join(os.path.dirname(obj_path), map_d)
+
+            # ===== 有贴图 =====
+            if map_kd is not None and os.path.exists(map_kd):
+
+                texture_image = load_texture_baked_alpha(
+                    map_kd,
+                    map_d,
+                    alpha_scalar,
+                    device
+                )
+
+                tex = TexturesUV(
+                    maps=texture_image,
+                    faces_uvs=current_faces_uvs[None],
+                    verts_uvs=current_verts_uvs[None]
+                )
+
+            # ===== 无贴图：纯色 =====
+            else:
+                try:
+                    diffuse_color = aux.material_colors[mat_name]["diffuse_color"]
+                    color = torch.tensor(diffuse_color, device=device, dtype=torch.float32)
+                    if color.ndim == 2:
+                        color = color[0]
+                except:
+                    color = torch.tensor([0.7, 0.7, 0.7], device=device)
+
+                color = color.clamp(0, 1)
+
+                # alpha 作用到颜色
+                color = color * alpha_scalar
+
+                texture_image = color.view(1, 1, 1, 3).expand(1, 512, 512, 3).contiguous()
+
+                tex = TexturesUV(
+                    maps=texture_image,
+                    faces_uvs=current_faces_uvs[None],
+                    verts_uvs=current_verts_uvs[None]
+                )
+
+        # =========================
+        # 无 UV：vertex color
+        # =========================
+        else:
+            try:
+                diffuse_color = aux.material_colors[mat_name]["diffuse_color"]
+                color = torch.tensor(diffuse_color, device=device, dtype=torch.float32)
+                if color.ndim == 2:
+                    color = color[0]
+            except:
+                color = torch.tensor([0.7, 0.7, 0.7], device=device)
+
+            color = color.clamp(0, 1)
+
+            verts_color = color.expand(len(verts), 3)
+
+            tex = TexturesVertex(verts_features=verts_color[None])
+
+        mesh = Meshes(
+            verts=[verts],
+            faces=[current_faces_idx],
+            textures=tex
+        )
+
+        meshes_list.append(mesh)
+        material_names_list.append(mat_name)
+
+###########################################################################
+    # ===================== 【自动计算：模型原点 + 大小】 =====================
+    ###########################################################################
+    print("\n" + "="*60)
+    print("📦 模型尺寸 & 原点信息")
+    print("="*60)
+
+    # 1. 顶点范围
+    v_min = verts.min(dim=0)[0]
+    v_max = verts.max(dim=0)[0]
+    print(f"顶点最小坐标 (min): {v_min.tolist()}")
+    print(f"顶点最大坐标 (max): {v_max.tolist()}")
+
+    # 2. 模型尺寸 (width, height, depth)
+    size = v_max - v_min
+    print(f"模型尺寸 X(宽): {size[0]:.3f}")
+    print(f"模型尺寸 Y(深): {size[1]:.3f}")
+    print(f"模型尺寸 Z(高): {size[2]:.3f}")
+
+    # 3. 模型几何中心
+    center = (v_min + v_max) / 2
+    print(f"模型几何中心: {center.tolist()}")
+
+    # 4. 模型底面中心（你CARLA对齐用的地面点）
+    bottom_center = torch.tensor([
+        center[0],
+        center[1],
+        v_min[2]  # Z取最低 = 地面
+    ], device=device)
+    print(f"模型底面中心点 (地面接触点): {bottom_center.tolist()}")
+
+    # 5. 当前模型原点（就是OBJ导出时的原点：(0,0,0) 在模型中的位置）
+    print(f"OBJ文件原点 (0,0,0) 相对于模型的位置: [0, 0, 0]")
+    print("⚠️  说明：PyTorch3D加载后的原点 = Blender里设置的原点")
+    print("="*60 + "\n")
+
+    print(f"共生成 {len(meshes_list)} 个子 Mesh (材质分割)")
+
+    return meshes_list, material_names_list
+
+
 def generate_camera_from_params(
     pose_paths: list,  
     device: torch.device,
@@ -951,55 +1136,60 @@ def generate_camera_from_params(
     return batch_cameras
 
 
+# 存在差异
 # def generate_camera_from_params_v2(
-#     cam_relative_pos,
-#     cam_relative_rot,  
+#     cam_relative_pos,   # (B,3) or (3,)
+#     cam_relative_rot,   # 已不再使用（保留接口）
 #     device: torch.device,
-#     fov: float = 110.0,  
-#     img_size: tuple = (720, 1280)  # ( height,width)
-# ) -> FoVPerspectiveCameras:  # 修正返回类型：PerspectiveCameras → FoVPerspectiveCameras
-#     """
-#     批量加载位姿文件，生成单个批量相机对象（而非列表）
-#     参数：
-#         pose_paths: 相机位姿文件路径列表
-#         device: 运行设备 (cpu/cuda)
-#         fov: 相机视场角（单位：度），默认110°
-#         img_size: 图像尺寸 (width, height)，默认(720,1280)
-#     返回：
-#         FoVPerspectiveCameras: 批量相机对象（包含len(pose_paths)个相机）
-#     """
-#     # ================= 1 初始化存储列表 =================
-#     R_list = []  # 存储所有相机的旋转矩阵 (3,3)
-#     T_list = []  # 存储所有相机的平移向量 (3,)
-#     H,W=img_size
-#     fov_horizontal_deg = fov
+#     fov: float = 90,
+#     img_size: tuple = (512, 512)
+# ) -> FoVPerspectiveCameras:
+
+#     # ===================== 图像参数 =====================
+#     H, W = img_size
 #     aspect = W / H
-#     fov_h_rad = math.radians(fov_horizontal_deg)
-#     fov_v_rad = math.degrees(2 * math.atan(math.tan(fov_h_rad / 2) / aspect))
-#     # ================= 2 批量加载位姿并计算外参 =================
-#     for pose_path in pose_paths:
-#         # 加载单个位姿文件
-#         pose = load_camera_pose(pose_path)
-#         if pose is None:
-#             raise ValueError(f"位姿文件加载失败：{pose_path}")
+
+#     fov_h_rad = math.radians(fov)
+#     fov_v_rad = math.degrees(
+#         2 * math.atan(math.tan(fov_h_rad / 2) / aspect)
+#     )
+
+#     # ===================== batch 统一 =====================
+#     if cam_relative_pos.ndim == 1:
+#         cam_relative_pos = cam_relative_pos.unsqueeze(0)
+
+#     cam_relative_pos = cam_relative_pos.to(device)
+
+#     B = cam_relative_pos.shape[0]
+
+#     R_list = []
+#     T_list = []
+
+#     # ===================== look-at 构造 =====================
+#     for i in range(B):
+
+#         x, y, z = cam_relative_pos[i]
         
-#         # 提取相机位置,#可能要取负号,以calra为准，相机相对车辆原点的坐标（车辆底部的中心）
-#         x, y, z = pose['location']
-        
+#         x = x.detach().cpu().item()
+#         y = y.detach().cpu().item()
+#         z = z.detach().cpu().item()
+
 #         # 计算俯仰角和方位角（修正坐标系转换）
 #         distance=np.sqrt(x**2 + z**2 + y**2)
 #         pitch_carla = np.degrees(np.arctan2(z, np.sqrt(x**2 + y**2)))
 #         pitch=pitch_carla
 #         # 修正水平角度
-#         yaw_crla = -np.degrees(np.arctan2(y, x))  
-#         yaw=(yaw_crla-90)+180 # 修正坐标系转换，需要注意车辆坐标，carla坐标，opytorch3D坐标
+#         yaw = 180-np.degrees(np.arctan2(x, y))
+#         print(yaw)
+#         # yaw_crla = -np.degrees(np.arctan2(y, x))  
+#         # yaw=(yaw-90)+180 # 修正坐标系转换，需要注意车辆坐标，carla坐标，opytorch3D坐标
 #         # 生成单个相机的外参
 #         R_single, T_single = look_at_view_transform(
 #             dist=distance,
 #             elev=pitch,
 #             azim=yaw
 #         )
-        
+#         # T_single[0][2] += 0.8 #抬高位置
 #         # 转换为tensor并移到指定设备，去除batch维度
 #         R_single = R_single.squeeze(0).to(device)  # (3,3)
 #         T_single = T_single.squeeze(0).to(device)  # (3,)
@@ -1030,107 +1220,7 @@ def generate_camera_from_params(
 #     return batch_cameras
 
 
-
-
-# def generate_camera_from_params_v2(
-#     cam_relative_pos,   # (B,3) or (3,) -> [x, y, z]
-#     cam_relative_rot,   # (B,3) or (3,) -> [pitch, yaw, roll] (deg)
-#     device: torch.device,
-#     fov: float = 110.0,
-#     img_size: tuple = (720, 1280)
-# ) -> FoVPerspectiveCameras:
-
-#     # ===================== 图像参数 =====================
-#     H, W = img_size
-#     aspect = W / H
-
-#     # 水平FOV -> 垂直FOV
-#     fov_h_rad = math.radians(fov)
-#     fov_v_rad = math.degrees(
-#         2 * math.atan(math.tan(fov_h_rad / 2) / aspect)
-#     )
-
-#     # ===================== batch 统一 =====================
-#     if cam_relative_pos.ndim == 1:
-#         cam_relative_pos = cam_relative_pos.unsqueeze(0)
-#     if cam_relative_rot.ndim == 1:
-#         cam_relative_rot = cam_relative_rot.unsqueeze(0)
-
-#     cam_relative_pos = cam_relative_pos.to(device)
-#     cam_relative_rot = cam_relative_rot.to(device)
-
-#     B = cam_relative_pos.shape[0]
-
-#     R_list = []
-#     T_list = []
-
-#     # ===================== 构造外参 =====================
-#     for i in range(B):
-
-#         C = cam_relative_pos[i]  # 相机中心 (x,y,z)
-
-#         pitch_deg, yaw_deg, roll_deg = cam_relative_rot[i]
-
-#         # 角度 -> 弧度
-#         pitch = torch.deg2rad(-pitch_deg)
-#         yaw   = torch.deg2rad(yaw_deg)
-#         roll  = torch.deg2rad(roll_deg)
-
-#         # ===================== 构造旋转矩阵 =====================
-#         # pitch -> X轴
-#         Rx = torch.stack([
-#             torch.stack([torch.tensor(1.0, device=device), torch.tensor(0.0, device=device), torch.tensor(0.0, device=device)]),
-#             torch.stack([torch.tensor(0.0, device=device), torch.cos(pitch), -torch.sin(pitch)]),
-#             torch.stack([torch.tensor(0.0, device=device), torch.sin(pitch),  torch.cos(pitch)])
-#         ])
-
-#         # yaw -> Y轴
-#         Ry = torch.stack([
-#             torch.stack([ torch.cos(yaw), torch.tensor(0.0, device=device), torch.sin(yaw)]),
-#             torch.stack([ torch.tensor(0.0, device=device), torch.tensor(1.0, device=device), torch.tensor(0.0, device=device)]),
-#             torch.stack([-torch.sin(yaw), torch.tensor(0.0, device=device), torch.cos(yaw)])
-#         ])
-
-#         # roll -> Z轴
-#         Rz = torch.stack([
-#             torch.stack([torch.cos(roll), -torch.sin(roll), torch.tensor(0.0, device=device)]),
-#             torch.stack([torch.sin(roll),  torch.cos(roll), torch.tensor(0.0, device=device)]),
-#             torch.stack([torch.tensor(0.0, device=device), torch.tensor(0.0, device=device), torch.tensor(1.0, device=device)])
-#         ])
-
-#         # ===================== XYZ 顺序 =====================
-#         R = Rx @ Ry @ Rz
-
-#         # ===================== 外参 =====================
-#         T = -R @ C
-
-#         R_list.append(R)
-#         T_list.append(T)
-
-#     R_batch = torch.stack(R_list, dim=0)   # (B,3,3)
-#     T_batch = torch.stack(T_list, dim=0)   # (B,3)
-
-#     # ===================== 正交化（防数值误差） =====================
-#     try:
-#         U, _, V = torch.linalg.svd(R_batch)
-#         R_batch = torch.bmm(U, V.transpose(1, 2))
-#     except:
-#         pass
-
-#     # ===================== 构建相机 =====================
-#     cameras = FoVPerspectiveCameras(
-#         device=device,
-#         R=R_batch,
-#         T=T_batch,
-#         fov=fov_v_rad,
-#         znear=0.1,
-#         zfar=100.0,
-#         aspect_ratio=aspect,
-#     )
-
-#     return cameras
-
-
+# 存在差异
 def generate_camera_from_params_v2(
     cam_relative_pos,   # (B,3) or (3,)
     cam_relative_rot,   # 已不再使用（保留接口）
@@ -1166,7 +1256,7 @@ def generate_camera_from_params_v2(
         
         x = x.detach().cpu().item()
         y = y.detach().cpu().item()
-        z = z.detach().cpu().item()
+        z = z.detach().cpu().item()- (0.649/2)
 
         # 计算俯仰角和方位角（修正坐标系转换）
         distance=np.sqrt(x**2 + z**2 + y**2)
@@ -1183,11 +1273,11 @@ def generate_camera_from_params_v2(
             elev=pitch,
             azim=yaw
         )
-        
+        # T_single[0][2] += 0.8 #抬高位置
         # 转换为tensor并移到指定设备，去除batch维度
         R_single = R_single.squeeze(0).to(device)  # (3,3)
         T_single = T_single.squeeze(0).to(device)  # (3,)
-        
+        T_single[2] += (0.649/2) #抬高位置
         # 添加到列表
         R_list.append(R_single)
         T_list.append(T_single)
@@ -1212,6 +1302,83 @@ def generate_camera_from_params_v2(
     )
 
     return batch_cameras
+
+
+# def generate_camera_from_params_v2(
+#     cam_relative_pos,   # (B,3) or (3,) -> x,y,z 相机位置
+#     cam_relative_rot,   # (B,3) or (3,) -> [pitch, yaw, roll] 手动视角
+#     device: torch.device,
+#     fov: float = 90,
+#     img_size: tuple = (512, 512)
+# ) -> FoVPerspectiveCameras:
+
+#     # ===================== 图像参数（完全不变） =====================
+#     H, W = img_size
+#     aspect = W / H
+
+#     fov_h_rad = math.radians(fov)
+#     fov_v_rad = math.degrees(
+#         2 * math.atan(math.tan(fov_h_rad / 2) / aspect)
+#     )
+
+#     # ===================== batch 统一 =====================
+#     if cam_relative_pos.ndim == 1:
+#         cam_relative_pos = cam_relative_pos.unsqueeze(0)
+#     if cam_relative_rot.ndim == 1:
+#         cam_relative_rot = cam_relative_rot.unsqueeze(0)
+
+#     cam_relative_pos = cam_relative_pos.to(device)
+#     cam_relative_rot = cam_relative_rot.to(device)
+
+#     B = cam_relative_pos.shape[0]
+#     R_list = []
+#     T_list = []
+
+#     # ===================== 沿用你原版坐标系逻辑 =====================
+#     for i in range(B):
+#         x, y, z = cam_relative_pos[i]
+#         pitch, yaw, roll = cam_relative_rot[i]  # 手动传入
+
+#         x = x.detach().cpu().item()
+#         y = y.detach().cpu().item()
+#         z = z.detach().cpu().item()
+
+#         # ==============================================
+#         # 关键：直接使用你传入的 pitch / yaw
+#         # 不自动计算！不自动朝向原点！
+#         # ==============================================
+#         distance = np.sqrt(x**2 + y**2 + z**2)
+#         elev = pitch.item()  # 手动俯仰角
+#         azim = yaw.item()    # 手动偏航角
+
+#         # 你原版的、正确的、坐标系对齐的函数
+#         R_single, T_single = look_at_view_transform(
+#             dist=distance,
+#             elev=elev,
+#             azim=azim
+#         )
+
+#         R_single = R_single.squeeze(0).to(device)
+#         T_single = T_single.squeeze(0).to(device)
+
+#         R_list.append(R_single)
+#         T_list.append(T_single)
+
+#     # ===================== 拼接（完全不变） =====================
+#     R_batch = torch.stack(R_list, dim=0)
+#     T_batch = torch.stack(T_list, dim=0)
+
+#     batch_cameras = FoVPerspectiveCameras(
+#         device=device,
+#         R=R_batch,
+#         T=T_batch,
+#         fov=fov_v_rad,
+#         znear=0.1,
+#         zfar=100.0,
+#     )
+
+#     return batch_cameras
+
 
 
 def camera_generate_fixed(device):

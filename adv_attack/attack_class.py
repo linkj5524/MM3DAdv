@@ -2011,7 +2011,7 @@ class Common_ATTACK:
         self.optim.train_loader= train_loader
         # self.optim.val_loader= val_loader
         
-        mesh_model_t,material_list=load_obj_model_return_mesh_material(self.exp_params["mesh_model_path"], 
+        mesh_model_t,material_list=load_obj_model_return_mesh_material_v1(self.exp_params["mesh_model_path"], 
                                 optim_device,
                                 scale=100) # 倍数，缩放，单位这些不匹配
         self.optim.mesh_model =mesh_model_t
@@ -2057,20 +2057,20 @@ class Common_ATTACK:
                     # 渲染尺寸,0：h,1:w
                     image_size_render = (self.exp_params["render_size"]["height"],
                                         self.exp_params["render_size"]["width"])
-
-                    # ===================== 原始车辆渲染 =====================
-                    origin_com_tensor_rendered, object_mask = load_parma_and_render_main_v2(
-                        object_mesh=self.optim.mesh_model,
-                        background=backgroud_images,
-                        cam_relative_pos=cam_relative_pos,
-                        cam_relative_rot=cam_relative_rot,
-                        image_size=image_size_render,
-                        device=self.optim.optim_device,
-                        fov=90,
-                        blur_radius=0.0,
-                        faces_per_pixel=1
-                    )
-                    object_mask=torch.zeros_like(mask)
+                    origin_com_tensor_rendered=backgroud_images.clone().unsqueeze(0) # 先用背景图占位，后续渲染时会覆盖车辆区域
+                    # # ===================== 原始车辆渲染 =====================
+                    # origin_com_tensor_rendered, object_mask = load_parma_and_render_main_v2(
+                    #     object_mesh=self.optim.mesh_model,
+                    #     background=backgroud_images,
+                    #     cam_relative_pos=cam_relative_pos,
+                    #     cam_relative_rot=cam_relative_rot,
+                    #     image_size=image_size_render,
+                    #     device=self.optim.optim_device,
+                    #     fov=38,
+                    #     blur_radius=0.0,
+                    #     faces_per_pixel=1
+                    # )
+                    object_mask=mask
                     # ===================== 对抗纹理渲染 =====================
                     if self.optim.target_material is None or len(self.optim.target_material) != len(adv_tensor_generate):
                         adv_tex = adv_tensor_generate[0] if adv_tensor_generate.ndim == 4 else adv_tensor_generate
@@ -2095,7 +2095,7 @@ class Common_ATTACK:
                         cam_relative_rot=cam_relative_rot,
                         image_size=image_size_render,
                         device=self.optim.optim_device,
-                        fov=90,
+                        fov=38,
                         blur_radius=0.0,
                         faces_per_pixel=1
                     )
@@ -2579,267 +2579,6 @@ class Common_ATTACK:
         return metrics_all_models
 
 
-
-    def generate_adversarial_advcat(self):
-        """
-        advcat 对抗纹理完整训练
-        1. 渲染、检测、损失计算 完全复用原有 optim_step 逻辑
-        2. 纹理生成、正则优化、变量更新 全部在 advcat_attack 类内部
-        3. 纹理保存路径、格式、间隔、命名 与原有训练完全统一，兼容 validate_adversarial_texture 验证加载
-        """
-        from torch.cuda.amp import autocast, GradScaler
-        import os
-        from tqdm import tqdm
-
-        # ===================== 基础配置 & 精度AMP/BF16 初始化 =====================
-        use_amp = self.exp_params.get("use_amp", False)
-        use_bf16 = self.exp_params.get("use_bf16", False)
-        assert not (use_amp and use_bf16), "AMP和BF16不能同时启用"
-
-        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-        # 数据精度
-        if use_bf16 and torch.cuda.is_bf16_supported():
-            optim_data_type = torch.bfloat16
-        else:
-            optim_data_type = torch.float32
-
-        scaler = GradScaler() if use_amp else None
-
-        # ===================== 路径初始化（和原有保存路径完全一致） =====================
-        save_tensor_root = os.path.join(self.exp_params["experiment_path"], "texture")
-        os.makedirs(save_tensor_root, exist_ok=True)
-        train_epochs = self.exp_params.get("optim_epochs", 30)
-        save_interval = self.exp_params.get("texture_save_interval", 10)
-
-        # ===================== 加载3D模型、材质列表（同optim_step） =====================
-        mesh_model, material_list = load_obj_model_return_mesh_material(
-            self.exp_params["mesh_model_path"], device
-        )
-        target_material = self.exp_params["target_material_dict"]
-
-        # ===================== 加载训练数据集 =====================
-        train_loader, _ = build_from_cfg(
-            self.exp_params["dataloader"],
-            batch_size=self.exp_params["batch_size"],
-            num_workers=self.exp_params["num_workers"],
-        )
-
-        # ===================== 初始化 advcat_attack =====================
-        render_size = (self.exp_params["render_size"]["height"], self.exp_params["render_size"]["width"])
-        H, W = render_size
-        self.adv_attack = advcat_attack(
-            device=device,
-            target_material_list=target_material,
-            image_size=(H, W),
-            num_points=60,
-            lr=1e-2,
-            lr_seed=1e-2,
-            clamp_shift=0.1
-        )
-
-        # 补全attack内部损失权重
-        self.adv_attack.weight_det = 1.0
-        self.adv_attack.weight_tv = 0.0
-        self.adv_attack.weight_ctrl = 1.0
-        self.adv_attack.weight_seed = 0.0
-        self.adv_attack.seed_temp = 1.0
-
-        # ===================== 初始化检测模型（完全同原有optim_step） =====================
-        self.object_detect = self.init_object_detection_return(device=device)
-        detect_model_type = self.detect_params["attack_model"]["model_type"]
-        self.cross_entro_loss = YOLOv11DetectionLoss(**self.detect_params, **self.exp_params).to(device, dtype=optim_data_type)
-
-        epoch_false_pos_rates = []
-        global_step = 0
-
-        print("\n===== Start AdvCat Adversarial Training =====")
-
-        # ===================== 训练主循环 =====================
-        for epoch in tqdm(range(train_epochs), desc="AdvCat Optimizing"):
-            epoch_total_fp = 0.0
-            epoch_batch_count = 0
-            step_num = 0
-            # for backgroud_images, cameras_pose_path in train_loader:
-            for backgroud_images, cameras_pose_path in tqdm(train_loader, desc="Training Loader", leave=True):
-                backgroud_images = backgroud_images.to(device)
-
-                # ===================== AMP/BF16 自动精度上下文 =====================
-                with autocast(enabled=use_amp, dtype=torch.bfloat16 if use_bf16 else torch.float16):
-
-                    # --------------------------
-                    # 1. 攻击类内部生成最新对抗纹理
-                    # --------------------------
-                    self.adv_attack.update_mesh(tau=0.3, type='gumbel', blur=1.0)
-
-                    # 提取纹理 转换格式 [1,3,H,W] 适配原有渲染接口
-                    tex_dict = self.adv_attack.tex_dict
-                    target_index_dict = {}
-                    for mat in material_list:
-                        if mat in target_material:
-                            target_index_dict[mat] = tex_dict[mat]['tex'].permute(0, 3, 1, 2).contiguous()
-
-
-     
-                    # --------------------------
-                    # 2. 原始模型渲染（完全复刻optim_step流程）
-                    # --------------------------
-                    origin_com_tensor_rendered, object_mask = load_parma_and_render_main(
-                        object_mesh=mesh_model,
-                        background=backgroud_images,
-                        path_camera_pose=cameras_pose_path,
-                        image_size=render_size,
-                        device=device,
-                        fov=110,
-                        blur_radius=0.0,
-                        faces_per_pixel=1
-                    )
-
-                    # --------------------------
-                    # 3. 对抗纹理更新到3D模型并渲染
-                    # --------------------------
-                    new_mesh_rendered_adv_com = update_meshes_texture_dict(
-                        original_meshes_list=mesh_model,
-                        target_index_dict=target_index_dict,
-                        material_names_list=material_list,
-                        device=device
-                    )
-
-                    adv_com_tensor_rendered, _ = load_parma_and_render_main(
-                        object_mesh=new_mesh_rendered_adv_com,
-                        background=backgroud_images,
-                        path_camera_pose=cameras_pose_path,
-                        image_size=render_size,
-                        device=device,
-                        fov=110,
-                        blur_radius=0.0,
-                        faces_per_pixel=1
-                    )
-
-                    # --------------------------
-                    # 4. 检测尺寸缩放预处理
-                    # --------------------------
-                    detect_image_size = self.exp_params["image_size"]
-                    adv_com_tensor_rendered_sized = resize_tensor_ratio_pad(
-                        adv_com_tensor_rendered, height=detect_image_size, width=detect_image_size
-                    )
-                    origin_com_tensor_rendered_sized = resize_tensor_ratio_pad(
-                        origin_com_tensor_rendered, height=detect_image_size, width=detect_image_size
-                    )
-                    object_mask_resize = resize_tensor_ratio_pad(
-                        object_mask, height=detect_image_size, width=detect_image_size
-                    )
-
-                    # --------------------------
-                    # 5. 构造检测GT（完全原版）
-                    # --------------------------
-                    result_object_origin_only_object_gt = mask_to_gt_dict(
-                        mask_tensor=object_mask_resize,
-                        label=self.exp_params['target_class'],
-                        num_classes=self.detect_params["nums_class"],
-                        device=device,
-                        threshold=1e-3
-                    )
-
-                    # --------------------------
-                    # 6. 检测器前向推理
-                    # --------------------------
-                    # 对抗样本检测
-                    detect_visual_path_list = [
-                        os.path.join(self.exp_params["visual_path"], f"step_{step_num % 20}_{i}")
-                        for i in range(backgroud_images.shape[0])  # ← 修复动态 batch
-                    ]
-                    step_num+=1
-
-                    result_object_adv_com, _ = self.object_detect.detect_eval(
-                        adv_com_tensor_rendered_sized,
-                        grad_status=True,
-                        file_path=detect_visual_path_list,
-                        file_name="adv.jpg",
-                        model_type=detect_model_type
-                    )
-                    #有点问题，只能单batch。op
-                    # if len(result_object_adv_com['boxes'][0])<1:
-                    #     continue
-                    # 原始样本检测
-                    result_object_origin, _ = self.object_detect.detect_eval(
-                        origin_com_tensor_rendered_sized,
-                        grad_status=True,
-                        file_path=detect_visual_path_list,
-                        file_name="origin.jpg",
-                        model_type=detect_model_type
-                    )
-
-                    # 数据设备&精度统一
-                    origin_com_tensor_rendered_sized = move_to_gpu_and_cast_dtype(
-                        origin_com_tensor_rendered_sized, device, optim_data_type
-                    )
-                    adv_com_tensor_rendered_sized = move_to_gpu_and_cast_dtype(
-                        adv_com_tensor_rendered_sized, device, optim_data_type
-                    )
-                    backgroud_images = move_to_gpu_and_cast_dtype(
-                        backgroud_images, device, optim_data_type
-                    )
-
-                    # --------------------------
-                    # 7. 原版检测损失计算（完全沿用你YOLOv11损失）
-                    # --------------------------
-                    loss, loss_dict = self.cross_entro_loss(result_object_adv_com, result_object_origin_only_object_gt)
-                    det_loss = loss_dict['class_loss']
-                    # 判断是否有梯度
-                    # if not det_loss.requires_grad:
-                    #     continue
-                    # --------------------------
-                    # 8. 核心：调用attack内部完成全部优化
-                    # 总损失 = 检测损失 + advcat内部全部正则损失加权
-                    # 反向传播、变量更新、参数裁剪全部类内完成
-                    # --------------------------
-                    total_loss, loss_info = self.adv_attack.step(det_loss=det_loss)
-
-                    # --------------------------
-                    # FP误检率统计（和原有训练指标保持一致）
-                    # --------------------------
-                    temp_dict = count_false_positive_single_model(
-                        model_result=result_object_adv_com,
-                        ref_result=result_object_origin_only_object_gt,
-                        iou_threshold=0.5,
-                        conf_threshold=0.5
-                    )
-                    epoch_total_fp += temp_dict["avg_false_pos_prob"]
-                    epoch_batch_count += sum(temp_dict['false_pos_counts'])
-
-                # ===================== 每间隔保存纹理（**格式、路径、命名完全和你之前训练统一**） =====================
-                global_step += 1
-                if global_step % save_interval == 0:
-                    # 取出所有材质纹理，打包保存（多材质兼容字典格式）
-                    save_tex_dict = {}
-                    for mat in target_material:
-                        tex = self.adv_attack.tex_dict[mat]['tex'].permute(0, 3, 1, 2).contiguous()
-                        save_tex_dict[mat] = tex
-
-                    # 保存命名和你原optim_step完全一致
-                    save_tensor_path = os.path.join(save_tensor_root, f"texture_{global_step}.pt")
-                    torch.save(save_tex_dict, save_tensor_path)
-                    print(f"\n 保存step={global_step} 纹理至: {save_tensor_path}")
-
-            # ===================== Epoch 指标日志 =====================
-            if epoch_batch_count > 0:
-                avg_fp_epoch = epoch_total_fp / epoch_batch_count
-                epoch_false_pos_rates.append(avg_fp_epoch)
-                print(f"\nEpoch [{epoch+1}/{train_epochs}] "
-                    f"Avg False Positive Prob: {avg_fp_epoch:.4f} | "
-                    f"Total Loss: {total_loss.item():.4f} | "
-                    f"Det Class Loss: {det_loss.item():.4f} | "
-                    f"Ctrl Reg Loss: {loss_info['ctrl_loss'].item():.4f}")
-
-        # ===================== 训练结束额外保存最终版纹理 =====================
-        final_tex_dict = {}
-        for mat in material_list:
-            final_tex_dict[mat] = self.adv_attack.tex_dict[mat]['tex'].permute(0, 3, 1, 2).contiguous()
-        final_save_path = os.path.join(save_tensor_root, "texture_final.pt")
-        torch.save(final_tex_dict, final_save_path)
-        print(f"\ 全部训练完成！最终纹理保存至: {final_save_path}")
-
-        return epoch_false_pos_rates
 
 
 
