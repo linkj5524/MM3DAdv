@@ -1264,7 +1264,7 @@ def generate_camera_from_params_v2(
         pitch=pitch_carla
         # 修正水平角度
         yaw = 180-np.degrees(np.arctan2(x, y))
-        print(yaw)
+        # print(yaw)
         # yaw_crla = -np.degrees(np.arctan2(y, x))  
         # yaw=(yaw-90)+180 # 修正坐标系转换，需要注意车辆坐标，carla坐标，opytorch3D坐标
         # 生成单个相机的外参

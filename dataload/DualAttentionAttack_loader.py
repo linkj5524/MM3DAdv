@@ -290,11 +290,11 @@ class MyDataset(Dataset):
             dtype=torch.float32
         )
 
-        print(f"Camera position: {cam_trans}\n")
-        print(f"Vehicle position: {veh_trans}\n")
+        # print(f"Camera position: {cam_trans}\n")
+        # print(f"Vehicle position: {veh_trans}\n")
 
-        print(f"Camera rotation: {cam_pos_tensor}\n")
-        print(f"Relative position (CARLA): {cam_rot_tensor}\n")
+        # print(f"Camera rotation: {cam_pos_tensor}\n")
+        # print(f"Relative position (CARLA): {cam_rot_tensor}\n")
         # 转化为标准，x,y,z,右手系，车头朝x。
         # 实际车头朝x，Z是左右，y是上下
 

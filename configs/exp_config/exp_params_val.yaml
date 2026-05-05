@@ -4,8 +4,8 @@
 image_size : 512 
 
 render_size:
-  width: 1280
-  height: 720
+  width: 512
+  height: 512
 device: "cuda"  
 # optim params
 optim_epochs: 2
@@ -41,10 +41,8 @@ perceptual_loss_weight: 0.01 ## 默认1： 1000 默认2：1000
 class_loss_weight : 1  # 1  
 HUV_loss_weight : 5
 
-texture_path : /root/autodl-fs/MM3Dadv_exp/attack/text_cmp/tex2/texture/texture_final.pt
-experiment_path: /root/autodl-fs/MM3Dadv_exp/val/attack_val_20260502/text_cmp/tex2
-# train_root_dir : "/root/autodl-fs/MM3DAdv_data/env_data/carla_sample_data20260316/vehicle_tesla_model3/location_000"
-# val_root_dir : "/root/autodl-fs/MM3DAdv_data/env_data/carla_sample_data20260316/vehicle_tesla_model3/location_000_random"
+texture_path : /root/autodl-fs/MM3Dadv_exp/attack/baseline_cmp/yolov3/texture/texture_final.pt
+experiment_path: /root/autodl-fs/MM3Dadv_exp/val/attack_val_20260502/baseline
 
 iou_threshold_val: 0.5
 conf_threshold_val: 0.5
@@ -53,31 +51,32 @@ conf_threshold_val: 0.5
 
 
 dataloader:
-  target: adv_attack.util.build_RGBCameraPose_dataloader_single_pathV2
-
+  target: dataload.DualAttentionAttack_loader.MyDataset
   params:
-    root_dir: "/root/autodl-fs/MM3DAdv_data/env_map/carla_sample_data20260412"
-    # root_dir: "/root/autodl-fs/MM3DAdv_data/env_map/carla_sample_data20260412/R_4.0_H_1.8"
-    # root_dir: "/root/autodl-fs/data_debug/catla_train_val_debug"
-    
-
-    transform:
-      target: torchvision.transforms.Compose
-      params:
-        transforms:
-
-          - target: torchvision.transforms.ToTensor
+    data_dir: /root/autodl-fs/MM3DAdv_data/baseline_data/phy_attack/test
+    img_size: 512
+    mask_dir: /root/autodl-fs/MM3DAdv_data/baseline_data/masks
 
 
 batch_size: 1
 num_workers: 4
 
-mesh_model_path: "/root/autodl-fs/MM3DAdv_data/3Dmodel/mazda/mazda.obj"
 
-render_face_size : 3  # 面个数
+
+mesh_model_path: "/root/autodl-fs/MM3DAdv_data/3Dmodel/audi/audi_et_te_origin.obj"
+
+render_face_size : 1  # 面个数
 target_material_dict :
-  - "t1"
-  - "t2"
-  - "t3"
-  # - "body"
-  # - "MAT_Tire_Hub.001"
+  - "MI_CarExterior_Etron"
+
+
+# mesh_model_path: "/root/autodl-fs/MM3DAdv_data/3Dmodel/mazda/mazda.obj"
+# mesh_model_path: "/root/autodl-fs/MM3DAdv_data/3Dmodel/audi/audi_et_te_origin.obj"
+
+# render_face_size : 3  # 面个数
+# target_material_dict :
+#   - "t1"
+#   - "t2"
+#   - "t3"
+#   # - "body"
+#   # - "MAT_Tire_Hub.001"

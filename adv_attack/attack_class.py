@@ -2284,34 +2284,156 @@ class Common_ATTACK:
 
 
     # 验证
+
+    # def validate_adversarial_texture(
+    #     self,
+    #     texture_pt_path,
+    #     mesh_path=None,
+    #     save_visual=False
+    # ):
+    #     """
+    #     标准化验证函数：
+    #     - multi-model evaluation
+    #     - 标准 TP / FP / FN / GT
+    #     - 标准 recall 定义
+    #     """
+    #     if save_visual:
+    #         save_tensor_root = os.path.join(self.exp_params["experiment_path"], "visual_val")
+    #         os.makedirs(save_tensor_root, exist_ok=True)
+
+    #     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    #     # ========== 1. 加载 texture ==========
+    #     adv_texture = torch.load(texture_pt_path, map_location=device)
+    #     if isinstance(adv_texture, dict):
+    #         adv_texture = adv_texture["texture"]
+    #     adv_texture = adv_texture.to(device)
+    #     if adv_texture.dim() == 3:
+    #         adv_texture = adv_texture.unsqueeze(0)
+
+    #     # ========== 2. 加载 3D 模型 ==========
+    #     if mesh_path is None:
+    #         mesh_path = self.exp_params["mesh_model_path"]
+
+    #     mesh_model_t, material_list = load_obj_model_return_mesh_material_v1(
+    #         mesh_path,
+    #         device,
+    #         scale=100
+    #     )
+    #     target_material = self.exp_params["target_material_dict"]
+
+    #     # ========== 3. 构建验证集 loader ==========
+    #     val_loader = build_from_cfg(
+    #         self.exp_params["dataloader"]
+    #     )
+
+    #     # ========== 4. 初始化统计 ==========
+    #     model_stats = {}
+    #     metrices_all = {}
+    #     step_num = 0
+
+    #     # ========== 5. 遍历验证集 ==========
+    #     for index, backgroud_images, mask, cam_relative_pos, cam_relative_rot in tqdm(val_loader, desc="Validating"):
+    #         backgroud_images = backgroud_images.to(device)
+    #         image_size_render = (
+    #             self.exp_params["render_size"]["height"],
+    #             self.exp_params["render_size"]["width"]
+    #         )
+
+    #         # ===================== 原始车辆渲染（直接用 mask） =====================
+    #         origin_com_tensor_rendered = backgroud_images.clone().unsqueeze(0)
+    #         object_mask = mask
+
+    #         # ===================== 对抗纹理渲染 =====================
+    #         if target_material is None or len(target_material) != len(adv_texture):
+    #             adv_tex = adv_texture[0] if adv_texture.ndim == 4 else adv_texture
+    #             target_index_dict = {mat: adv_tex for mat in material_list}
+    #         else:
+    #             target_index_dict = {}
+    #             for mat, tex in zip(target_material, adv_texture):
+    #                 target_index_dict[mat] = tex
+
+    #         new_mesh_rendered_adv_com = update_meshes_texture_dict(
+    #             original_meshes_list=mesh_model_t,
+    #             target_index_dict=target_index_dict,
+    #             material_names_list=material_list,
+    #             device=device
+    #         )
+
+    #         adv_com_tensor_rendered, _ = load_parma_and_render_main_v2(
+    #             object_mesh=new_mesh_rendered_adv_com,
+    #             background=backgroud_images,
+    #             cam_relative_pos=cam_relative_pos,
+    #             cam_relative_rot=cam_relative_rot,
+    #             image_size=image_size_render,
+    #             device=device,
+    #             fov=38,
+    #             blur_radius=0.0,
+    #             faces_per_pixel=1
+    #         )
+
+    #         # ===================== 尺寸缩放 =====================
+    #         detect_image_size = self.exp_params["image_size"]
+    #         adv_com_tensor_rendered_sized = resize_tensor_ratio_pad(
+    #             adv_com_tensor_rendered, height=detect_image_size, width=detect_image_size
+    #         )
+    #         origin_com_tensor_rendered_sized = resize_tensor_ratio_pad(
+    #             origin_com_tensor_rendered, height=detect_image_size, width=detect_image_size
+    #         )
+    #         object_mask_resize = resize_tensor_ratio_pad(
+    #             object_mask, height=detect_image_size, width=detect_image_size
+    #         )
+
+    #         # ===================== 可视化 =====================
+    #         if save_visual:
+    #             adv_detect_path_list = [
+    #                 os.path.join(save_tensor_root, f"adv_detect_b{step_num}_{i}")
+    #                 for i in range(adv_com_tensor_rendered_sized.shape[0])
+    #             ]
+    #             origin_detect_path_list = [
+    #                 os.path.join(save_tensor_root, f"origin_detect_b{step_num}_{i}")
+    #                 for i in range(origin_com_tensor_rendered_sized.shape[0])
+    #             ]
+    #             for p in adv_detect_path_list + origin_detect_path_list:
+    #                 os.makedirs(p, exist_ok=True)
+
+    #             for i in range(adv_com_tensor_rendered.shape[0]):
+    #                 tensor2picture(adv_com_tensor_rendered[i], os.path.join(adv_detect_path_list[i], "adv.jpg"))
+    #                 tensor2picture(origin_com_tensor_rendered[i], os.path.join(origin_detect_path_list[i], "origin.jpg"))
+    #         else:
+    #             adv_detect_path_list = None
+    #             origin_detect_path_list = None
+
+    #         step_num += 1
+
+
+
+    #     return 
+
+
     def validate_adversarial_texture(
-        self,
-        texture_pt_path,
-        mesh_path=None,
-        save_visual=False
-    ):
+            self,
+            texture_pt_path,
+            mesh_path=None,
+            save_visual=False
+        ):
         """
         标准化验证函数：
         - multi-model evaluation
         - 标准 TP / FP / FN / GT
         - 标准 recall 定义
         """
-
         if save_visual:
             save_tensor_root = os.path.join(self.exp_params["experiment_path"], "visual_val")
             os.makedirs(save_tensor_root, exist_ok=True)
-
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # ========== 1. 加载 texture ==========
         adv_texture = torch.load(texture_pt_path, map_location=device)
-
         if isinstance(adv_texture, dict):
             adv_texture = adv_texture["texture"]
-
         adv_texture = adv_texture.to(device)
-
         if adv_texture.dim() == 3:
             adv_texture = adv_texture.unsqueeze(0)
 
@@ -2319,269 +2441,118 @@ class Common_ATTACK:
         if mesh_path is None:
             mesh_path = self.exp_params["mesh_model_path"]
 
-        mesh_model, material_list = load_obj_model_return_mesh_material(
+        mesh_model_t, material_list = load_obj_model_return_mesh_material_v1(
             mesh_path,
-            device
+            device,
+            scale=100
         )
-
         target_material = self.exp_params["target_material_dict"]
 
- 
+        # ========== 3. 构建验证集 loader ==========
+        val_loader = build_from_cfg(
+            self.exp_params["dataloader"]
+        )
 
-        _ ,val_loader=build_from_cfg(self.exp_params["dataloader"],
-                                             batch_size=self.exp_params["batch_size"],
-                                              num_workers=self.exp_params["num_workers"],)
+        # ========== 4. 初始化统计 ==========
+        model_stats = {}
+        metrices_all = {}
+        step_num = 0
 
-        # ========== 4. 每个模型统计 ==========
-        model_stats = {}  # model_name -> {tp, fp, fn, gt_total}
-        metrices_all = {}  # model_name -> {precision, recall, accuracy, fpr, asr}
-        # ========== 5. 遍历数据 ==========
-        step_num=0
-        # for backgroud_images, cameras_pose_path in val_loader:
-        for backgroud_images, cameras_pose_path in tqdm(val_loader):
-
+        # ========== 5. 遍历验证集 ==========
+        for index, backgroud_images, mask, cam_relative_pos, cam_relative_rot in tqdm(val_loader, desc="Validating"):
             backgroud_images = backgroud_images.to(device)
-
-            # ---------- 原始渲染 ----------
-            origin_rendered, object_mask = load_parma_and_render_main(
-                object_mesh=mesh_model,
-                background=backgroud_images,
-                path_camera_pose=cameras_pose_path,
-                image_size=(
-                    self.exp_params["render_size"]["height"],
-                    self.exp_params["render_size"]["width"]
-                ),
-                device=device,
-                fov=110,
-                blur_radius=0.0,
-                faces_per_pixel=1
+            image_size_render = (
+                self.exp_params["render_size"]["height"],
+                self.exp_params["render_size"]["width"]
             )
 
-            # ---------- 纹理映射 ----------
+            # ===================== 原始车辆渲染（直接用 mask） =====================
+            origin_com_tensor_rendered = backgroud_images.clone().unsqueeze(0)
+            object_mask = mask
+
+            # ===================== 对抗纹理渲染 =====================
             if target_material is None or len(target_material) != len(adv_texture):
-                adv_tex = adv_texture[0]
+                adv_tex = adv_texture[0] if adv_texture.ndim == 4 else adv_texture
                 target_index_dict = {mat: adv_tex for mat in material_list}
             else:
-                target_index_dict = {
-                    mat: tex for mat, tex in zip(target_material, adv_texture)
-                }
+                target_index_dict = {}
+                for mat, tex in zip(target_material, adv_texture):
+                    target_index_dict[mat] = tex
 
-            # ---------- 应用纹理 ----------
-            mesh_adv = update_meshes_texture_dict(
-                original_meshes_list=mesh_model,
+            new_mesh_rendered_adv_com = update_meshes_texture_dict(
+                original_meshes_list=mesh_model_t,
                 target_index_dict=target_index_dict,
                 material_names_list=material_list,
                 device=device
             )
 
-            # ---------- adversarial 渲染 ----------
-            adv_rendered, _ = load_parma_and_render_main(
-                object_mesh=mesh_adv,
+            adv_com_tensor_rendered, _ = load_parma_and_render_main_v2(
+                object_mesh=new_mesh_rendered_adv_com,
                 background=backgroud_images,
-                path_camera_pose=cameras_pose_path,
-                image_size=(
-                    self.exp_params["render_size"]["height"],
-                    self.exp_params["render_size"]["width"]
-                ),
+                cam_relative_pos=cam_relative_pos,
+                cam_relative_rot=cam_relative_rot,
+                image_size=image_size_render,
                 device=device,
-                fov=110,
+                fov=38,
                 blur_radius=0.0,
                 faces_per_pixel=1
             )
 
-            # ---------- resize ----------
-            detect_size = self.exp_params["image_size"]
-
-
-            adv_img = resize_tensor_ratio_pad(adv_rendered, detect_size, detect_size)
-            origin_img = resize_tensor_ratio_pad(origin_rendered, detect_size, detect_size)
-            mask_resized = resize_tensor_ratio_pad(object_mask, detect_size, detect_size)
-
-            # ---------- GT ----------
-            # 根据mask构造gt
-            gt_dict = mask_to_gt_dict(
-                mask_tensor=mask_resized,
-                label=self.exp_params["target_class"],
-                num_classes=self.detect_params["nums_class"],
-                device=device,
-                threshold=1e-3
+            # ===================== 尺寸缩放 =====================
+            detect_image_size = self.exp_params["image_size"]
+            adv_com_tensor_rendered_sized = resize_tensor_ratio_pad(
+                adv_com_tensor_rendered, height=detect_image_size, width=detect_image_size
             )
-            #可视化
+            origin_com_tensor_rendered_sized = resize_tensor_ratio_pad(
+                origin_com_tensor_rendered, height=detect_image_size, width=detect_image_size
+            )
+            object_mask_resize = resize_tensor_ratio_pad(
+                object_mask, height=detect_image_size, width=detect_image_size
+            )
+
+            # ===================== 可视化：同文件夹保存 + mask + GT =====================
             if save_visual:
-                adv_detect_path_list=[os.path.join(save_tensor_root,f"adv_detect_b{step_num}_{i}") for i in range(adv_img.shape[0])]
-                origin_detect_path_list=[os.path.join(save_tensor_root,f"origin_detect_b{step_num}_{i}") for i in range(origin_img.shape[0])]
-        
-                # 2. 得到列表后，创建每一个路径对应的目录
-                for path in adv_detect_path_list + origin_detect_path_list:
-                    os.makedirs(path, exist_ok=True)
+                # 统一文件夹：detect_b{step_num}_{i}
+                detect_path_list = [
+                    os.path.join(save_tensor_root, f"detect_b{step_num}_{i}")
+                    for i in range(adv_com_tensor_rendered_sized.shape[0])
+                ]
+                for p in detect_path_list:
+                    os.makedirs(p, exist_ok=True)
 
-            else:
-                adv_detect_path_list=None
-                origin_detect_path_list=None
-            step_num+=1
-            # 保存tensor为图像
-
-            if save_visual:
-                for i in range(adv_img.shape[0]):
-                        tensor2picture(adv_rendered[i],os.path.join( adv_detect_path_list[i],"adv.jpg"))
-                        tensor2picture(origin_rendered[i],os.path.join( origin_detect_path_list[i],"origin.jpg"))
-
+                for i in range(adv_com_tensor_rendered.shape[0]):
+                    save_dir = detect_path_list[i]
                     
+                    # 1. 保存原图
+                    tensor2picture(origin_com_tensor_rendered[i], os.path.join(save_dir, "origin.jpg"))
+                    # 2. 保存对抗图
+                    tensor2picture(adv_com_tensor_rendered[i], os.path.join(save_dir, "adv.jpg"))
+                    # 3. 保存 mask
+                    tensor2picture(object_mask[i], os.path.join(save_dir, "mask.jpg"))
 
-            # ---------- detection ----------
-            result_adv_dict = self.detect_val(
-                input_image=adv_img,
-                input_path=adv_detect_path_list,
-                input_file_name="adv_",
-            )
+                    # 4. 从 mask 计算最小外接矩形 → 归一化 GT (x1,y1,x2,y2)
+                    msk = object_mask[i].squeeze().cpu().numpy()  # (H,W)
+                    coords = (msk > 0).nonzero()
+                    if len(coords[0]) == 0:
+                        gt_box = [0.0, 0.0, 0.0, 0.0]
+                    else:
+                        y_min, y_max = coords[0].min(), coords[0].max()
+                        x_min, x_max = coords[1].min(), coords[1].max()
+                        h, w = msk.shape[:2]
+                        # 归一化
+                        x1 = x_min / w
+                        y1 = y_min / h
+                        x2 = x_max / w
+                        y2 = y_max / h
+                        gt_box = [float(x1), float(y1), float(x2), float(y2)]
+                    
+                    # 5. 保存 GT txt：纯坐标，无类别
+                    with open(os.path.join(save_dir, "gt.txt"), "w", encoding="utf-8") as f:
+                        f.write(f"{gt_box[0]:.6f} {gt_box[1]:.6f} {gt_box[2]:.6f} {gt_box[3]:.6f}\n")
 
-            result_origin_dict = self.detect_val(
-                input_image=origin_img,
-                input_path=origin_detect_path_list,
-                input_file_name="origin_",
-            )
+            step_num += 1
 
-            metics_1=camouflage_metrics_lib(adv_img=adv_rendered, 
-                                            ori_img=origin_rendered,
-                                                bg_img=backgroud_images, 
-                                                mask=object_mask)
-            for k,v in metics_1.items():
-                metrices_all[k]=v+metrices_all.get(k,0)
-            # ---------- per-model 统计 ----------
-            for model_name in result_origin_dict.keys():
-
-                if model_name not in model_stats:
-                    model_stats[model_name] = {
-                        "tp": 0,
-                        "fp": 0,
-                        "fn": 0,
-                        "gt_total": 0,
-                        "tp1": 0,
-                        "fp1": 0,
-                        "fn1": 0,
-                        "gt_total1": 0
-                    }
-
-                stats = compute_detection_metrics_v2(
-                    pred=result_adv_dict[model_name],
-                    gt=gt_dict,
-                    iou_thresh=self.exp_params["iou_threshold_val"],
-                    conf_thresh=self.exp_params["conf_threshold_val"],
-                )
-
-                stats_origin = compute_detection_metrics_v2(
-                    pred=result_origin_dict[model_name],
-                    gt=gt_dict,
-                    iou_thresh=self.exp_params["iou_threshold_val"],
-                    conf_thresh=self.exp_params["conf_threshold_val"],
-                )
-                
-                model_stats[model_name]["tp"] += stats["tp"]
-                model_stats[model_name]["fp"] += stats["fp"]
-                model_stats[model_name]["fn"] += stats["fn"]
-                model_stats[model_name]["gt_total"] += stats["gt_total"]
-
-                model_stats[model_name]["tp1"] += stats_origin["tp"]
-                model_stats[model_name]["fp1"] += stats_origin["fp"]
-                model_stats[model_name]["fn1"] += stats_origin["fn"]
-                model_stats[model_name]["gt_total1"] += stats_origin["gt_total"]
- 
-        # ========== 6. 汇总 ==========
-        metrics_all_models = {}
-
-        print("\n===== Validation Metrics (Per Model) =====")
-
-        for model_name, s in model_stats.items():
-
-            tp = s["tp"]
-            fp = s["fp"]
-            fn = s["fn"]
-            gt_total = s["gt_total"]
-
-            precision = tp / (tp + fp + 1e-6)
-
-            #  标准 recall
-            recall = tp / (gt_total + 1e-6)
-
-            accuracy = tp / (tp + fp + fn + 1e-6)
-
-            fpr = fp / (tp + fp + 1e-6)
-
-            #  标准 ASR
-            asr =1-recall
-            ####origin
-            tp1 = s["tp1"]
-            fp1 = s["fp1"]
-            fn1 = s["fn1"]
-            gt_total1 = s["gt_total1"]
-
-            precision1 = tp1 / (tp1 + fp1 + 1e-6)
-
-            #  标准 recall
-            recall1 = tp1 / (gt_total1 + 1e-6)
-
-            accuracy1 = tp1 / (tp1 + fp1 + fn1 + 1e-6)
-
-            fpr1 = fp1 / (tp1 + fp1 + 1e-6)
-
-            #  标准 ASR
-            asr1 =1-recall1
-
-
-            metrics_all_models[model_name] = {
-                "precision": precision,
-                "precision1" : precision1,
-                "recall": recall,
-                "recall1": recall1,
-                "accuracy1": accuracy1,
-                "accuracy": accuracy,
-                "false_positive_rate1": fpr1,
-                "false_positive_rate": fpr,
-                "attack_success_rate1": asr1,
-                "attack_success_rate": asr,
-
-                # 附加统计（建议保留）
-                "tp": tp,
-                "tp1": tp1,
-                "fp": fp,
-                "fp1": fp1,
-                "fn": fn,
-                "fn1": fn1,
-                "gt_total": gt_total,
-                "gt_total1": gt_total1,
-                # 
-            }
-
-            print(f"\n--- {model_name} ---")
-            for k, v in metrics_all_models[model_name].items():
-                if isinstance(v, float):
-                    print(f"{k}: {v:.4f}")
-                else:
-                    print(f"{k}: {v}")
-
-        # ========== 7. 平均值 ==========
-        metrics_avg = {}
-        for k ,v in metrices_all.items():
-            metrics_avg[k]=v/step_num
-        print("\n===== Validation Metrics (Avg) =====")
-        for k, v in metrics_avg.items():
-            if isinstance(v, float):
-                print(f"{k}: {v:.4f}")
-            else:
-                print(f"{k}: {v}")
-
-        # ========== 8. 保存结果 ==========
-        if self.exp_params["experiment_path"] is not None:
-            save_result_path = os.path.join(self.exp_params["experiment_path"], "result.json")
-            with open(save_result_path, "w") as f:
-                json.dump(metrics_all_models, f, indent=4)
-                json.dump(metrics_avg, f, indent=4)
-        return metrics_all_models
-
-
-
-
-
+        return
 
 
 

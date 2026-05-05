@@ -10,7 +10,7 @@ device: "cuda"
 # optim params
 optim_epochs: 1
 lr: 0.05     #0.05   
-lr_step: 500 # 10  ,按迭代次数算
+lr_step: 1000 # 10  ,按迭代次数算
 lr_decay: 0.8
 
 
@@ -39,18 +39,18 @@ TV_loss_weight: 0.01
 conext_loss_weight: 1 ## 默认 1：1000 默认2：2000
 perceptual_loss_weight: 2 ## 默认1： 1000 默认2：1000
 class_loss_weight : 1  # 1  
-HUV_loss_weight : 5
+HUV_loss_weight : 0
 
-experiment_path: "/root/autodl-fs/MM3Dadv_exp/attack/debug"
 
+experiment_path: /root/autodl-fs/MM3Dadv_exp/attack/baseline_cmp/yolov3
 
 
 dataloader:
   target: dataload.DualAttentionAttack_loader.MyDataset
   params:
-    data_dir: /root/autodl-fs/data_debug/cmp_debug/phy_attack
+    data_dir: /root/autodl-fs/MM3DAdv_data/baseline_data/phy_attack/train
     img_size: 512
-    mask_dir: /root/autodl-fs/data_debug/cmp_debug/masks
+    mask_dir: /root/autodl-fs/MM3DAdv_data/baseline_data/masks
 
 
 batch_size: 1
