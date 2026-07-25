@@ -355,24 +355,25 @@ if __name__ == '__main__':
 
     imgsize_width=attack.exp_params["image_size"]
 
+    #####使用某物体canny的代码
     img = cv2.imread(r'./test_imgs/texture.jpg')  # BGR 格式 (H, W, 3)
     # img=cv2.imread(r"./test_imgs/dog.png")
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # 转为 RGB
     
-    # # 2. 调用 Canny 函数
-    # canny_tensor = get_canny_edge_tensor(
-    #     input_image=img,
-    #     image_resolution=512,
-    #     num_samples=1,
-    #     low_threshold=150,
-    #     high_threshold=240
-    # )
+    # 2. 调用 Canny 函数
+    canny_tensor = get_canny_edge_tensor(
+        input_image=img,
+        image_resolution=512,
+        num_samples=1,
+        low_threshold=150,
+        high_threshold=240
+    )
 
-
-    canny_tensor=get_voronoi_canny_edge_tensor(
-                    image_resolution=512,
-                    num_samples=1,
-                    n_seeds=60) 
+    # ##### 使用voronoi的代码
+    # canny_tensor=get_voronoi_canny_edge_tensor(
+    #                 image_resolution=512,
+    #                 num_samples=1,
+    #                 n_seeds=60) 
 
     if canny_tensor.dim()==3:  # 添加维度
         canny_tensor = canny_tensor.unsqueeze(0)
